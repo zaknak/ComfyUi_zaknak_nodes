@@ -10,8 +10,8 @@
 
 ## ノード仕様一覧
 
-- [Mosaic By Mask](mosaic_by_mask.md): 白側マスク領域にだけモザイクを適用し、最終使用マスクも出力する
-- [Censor Bars By Mask](censor_bars_by_mask.md): マスク領域を参考に複数の平行帯を並べ、バーセンサ風に隠す
+- [Mosaic By Mask](mosaic_by_mask.md): 白側マスク領域にだけモザイクを適用し、mask バッチの内部結合モードにも対応する
+- [Censor Bars By Mask](censor_bars_by_mask.md): マスク領域を参考に複数の平行帯を並べ、mask バッチの内部結合モードにも対応する
 
 ノード追加後は、少なくとも以下を含むドキュメントを作成してください。
 

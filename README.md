@@ -34,8 +34,8 @@ git clone <this-repository-url> comfyui_zaknak_nodes
 
 | Node | 概要 | 詳細 | 状態 |
 | --- | --- | --- | --- |
-| Mosaic By Mask | 画像とマスクを入力し、白側マスク領域にモザイクを適用する | [docs/mosaic_by_mask.md](docs/mosaic_by_mask.md) | 実装済み |
-| Censor Bars By Mask | 画像とマスクを入力し、マスク領域を複数の平行帯で隠す | [docs/censor_bars_by_mask.md](docs/censor_bars_by_mask.md) | 実装済み |
+| Mosaic By Mask | 画像とマスクを入力し、白側マスク領域にモザイクを適用する。mask バッチの内部結合モードあり | [docs/mosaic_by_mask.md](docs/mosaic_by_mask.md) | 実装済み |
+| Censor Bars By Mask | 画像とマスクを入力し、マスク領域を複数の平行帯で隠す。mask バッチの内部結合モードあり | [docs/censor_bars_by_mask.md](docs/censor_bars_by_mask.md) | 実装済み |
 
 ## ドキュメント
 
