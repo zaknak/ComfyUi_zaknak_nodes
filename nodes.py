@@ -5,17 +5,18 @@ import torch
 import torch.nn.functional as F
 
 
-def _ensure_batch_mask(mask: torch.Tensor, batch_size: int, height: int, width: int) -> torch.Tensor:
+MASK_BATCH_MODES = ["match_image_batch", "merge_batch_to_one"]
+
+
+def _normalize_mask_shape(mask: torch.Tensor) -> torch.Tensor:
     if mask.dim() == 2:
         mask = mask.unsqueeze(0)
     if mask.dim() != 3:
         raise ValueError("mask must be [H, W] or [B, H, W]")
+    return mask
 
-    if mask.shape[0] == 1 and batch_size > 1:
-        mask = mask.expand(batch_size, -1, -1)
-    elif mask.shape[0] != batch_size:
-        raise ValueError("mask batch size must match image batch size")
 
+def _resize_mask(mask: torch.Tensor, height: int, width: int) -> torch.Tensor:
     if mask.shape[1] != height or mask.shape[2] != width:
         mask = F.interpolate(
             mask.unsqueeze(1),
@@ -23,7 +24,34 @@ def _ensure_batch_mask(mask: torch.Tensor, batch_size: int, height: int, width: 
             mode="bilinear",
             align_corners=False,
         ).squeeze(1)
+    return mask
 
+
+def _ensure_batch_mask(
+    mask: torch.Tensor,
+    batch_size: int,
+    height: int,
+    width: int,
+    mask_batch_mode: str = "match_image_batch",
+) -> torch.Tensor:
+    mask = _normalize_mask_shape(mask)
+
+    if mask_batch_mode not in MASK_BATCH_MODES:
+        raise ValueError(f"unsupported mask_batch_mode: {mask_batch_mode}")
+
+    if mask_batch_mode == "merge_batch_to_one":
+        mask = mask.amax(dim=0, keepdim=True)
+        mask = _resize_mask(mask, height, width)
+        if batch_size > 1:
+            mask = mask.expand(batch_size, -1, -1)
+        return mask.clamp(0.0, 1.0)
+
+    if mask.shape[0] == 1 and batch_size > 1:
+        mask = mask.expand(batch_size, -1, -1)
+    elif mask.shape[0] != batch_size:
+        raise ValueError("mask batch size must match image batch size")
+
+    mask = _resize_mask(mask, height, width)
     return mask.clamp(0.0, 1.0)
 
 
@@ -198,6 +226,7 @@ class MosaicByMask:
             "required": {
                 "image": ("IMAGE",),
                 "mask": ("MASK",),
+                "mask_batch_mode": (MASK_BATCH_MODES, {"default": "match_image_batch"}),
                 "invert_mask": ("BOOLEAN", {"default": False}),
                 "pixel_size": ("INT", {"default": 16, "min": 1, "max": 256, "step": 1}),
                 "edge_blur": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 64.0, "step": 0.5}),
@@ -209,11 +238,11 @@ class MosaicByMask:
     FUNCTION = "apply"
     CATEGORY = "zaknak/image"
 
-    def apply(self, image, mask, invert_mask, pixel_size, edge_blur):
+    def apply(self, image, mask, mask_batch_mode, invert_mask, pixel_size, edge_blur):
         batch_size, height, width, _ = image.shape
         image_nchw = image.movedim(-1, 1)
 
-        prepared_mask = _ensure_batch_mask(mask, batch_size, height, width)
+        prepared_mask = _ensure_batch_mask(mask, batch_size, height, width, mask_batch_mode)
         if invert_mask:
             prepared_mask = 1.0 - prepared_mask
 
@@ -231,6 +260,7 @@ class CensorBarsByMask:
             "required": {
                 "image": ("IMAGE",),
                 "mask": ("MASK",),
+                "mask_batch_mode": (MASK_BATCH_MODES, {"default": "match_image_batch"}),
                 "bar_color_r": ("INT", {"default": 0, "min": 0, "max": 255, "step": 1}),
                 "bar_color_g": ("INT", {"default": 0, "min": 0, "max": 255, "step": 1}),
                 "bar_color_b": ("INT", {"default": 0, "min": 0, "max": 255, "step": 1}),
@@ -255,6 +285,7 @@ class CensorBarsByMask:
         self,
         image,
         mask,
+        mask_batch_mode,
         bar_color_r,
         bar_color_g,
         bar_color_b,
@@ -273,11 +304,11 @@ class CensorBarsByMask:
         image_nchw = image.movedim(-1, 1)
 
         preprocess_start = time.perf_counter()
-        prepared_mask = _ensure_batch_mask(mask, batch_size, height, width)
+        prepared_mask = _ensure_batch_mask(mask, batch_size, height, width, mask_batch_mode)
         _log_timing(
             "preprocess_mask",
             time.perf_counter() - preprocess_start,
-            f"batch={batch_size}, size={width}x{height}",
+            f"batch={batch_size}, size={width}x{height}, mode={mask_batch_mode}",
         )
 
         mask_max = float(prepared_mask.max().item())
