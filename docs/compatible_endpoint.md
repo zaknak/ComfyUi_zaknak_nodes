@@ -2,7 +2,7 @@
 
 ## 機能概要
 
-`Compatible Endpoint` は、外部で起動している OpenAI 互換 API サーバーへの接続設定をまとめて扱うための ComfyUI ノードです。ベース URL、API キー、モデル一覧取得、モデル指定を担当し、後続のチャット送信ノードから再利用できる接続情報を提供します。
+`Compatible Endpoint` は、外部で起動している OpenAI 互換 API サーバーへの接続設定をまとめて扱うための ComfyUI ノードです。ベース URL、API キー、モデル一覧取得、既定モデルの決定を担当し、後続のチャット送信ノードから再利用できる接続情報を提供します。
 
 このノードは、実際のチャット送信を行いません。接続先に関する責務を分離し、送信ノード側の UI と責務を軽く保つことを目的とします。
 
@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `base_url` | `STRING` | OpenAI 互換 API サーバーのベース URL。例: `http://127.0.0.1:1234/v1` |
 | `api_key` | `STRING` | API キー。ローカル用途では空欄許容を基本とするが、必要なサーバーでは利用する |
-| `model_name` | `STRING` | 利用するモデル名。現状はこの入力を手動で指定する |
+| `model_name` | `STRING` | 利用するモデル名。空欄時は取得したモデル一覧から既定値を決定する |
 | `refresh_models` | `BOOLEAN` | `true` の場合、`/models` 取得を試みる |
 | `timeout_seconds` | `FLOAT` | モデル一覧取得に用いるタイムアウト秒数 |
 
@@ -23,7 +23,7 @@
 | 名前 | 型 | 説明 |
 | --- | --- | --- |
 | `endpoint` | `COMPATIBLE_ENDPOINT` | 後続ノードへ渡す接続設定 |
-| `model_name` | `STRING` | 最終的に選択または指定されたモデル名 |
+| `model_name` | `STRING` | 最終的に選択または採用されたモデル名 |
 | `models_json` | `STRING` | 取得できたモデル一覧の JSON 文字列。取得失敗時はエラー要約を含む |
 | `status_text` | `STRING` | 接続確認や取得結果を要約した表示用文字列 |
 
@@ -31,16 +31,22 @@
 
 - `base_url` はチャット系 API とモデル一覧取得 API の共通ベースとして扱います
 - `refresh_models=true` の場合、`/models` 取得を試みます
-- モデル一覧取得に成功した場合でも、現状の実装では動的ドロップダウン化はせず、`models_json` と `status_text` で結果を返します
+- モデル一覧取得に成功し、`model_name` が空なら、取得一覧の先頭モデルを既定値として採用します
+- モデル一覧取得に成功しても一覧が空なら、自動選択は行いません
 - モデル一覧取得に失敗または非対応の場合でも、`model_name` の手動入力で利用を継続できます
 - `api_key` が空でも接続先が受け付ける場合はそのまま利用できます
-- 取得モデルが 1 件だけで `model_name` が空なら、そのモデルを自動選択します
+- `status_text` には取得件数、既定値の自動採用有無、手入力モデルの妥当性などを要約します
+- より明示的に別モデルを選びたい場合は、`models_json` を `Compatible Model Selector` へ渡して `model_name` を選択します
 
 ## 使用例
 
-### ローカル LM Studio へ接続する例
+### 既定モデルをそのまま使う例
 
-`base_url=http://127.0.0.1:1234/v1` を指定し、`refresh_models=true` で一覧取得を試します。返ってきた `models_json` を見て `model_name` を決め、後続ノードへ渡します。
+`base_url=http://127.0.0.1:1234/v1` を指定し、`refresh_models=true` で一覧取得を試します。`model_name` が空なら、取得できたモデル一覧の先頭要素が自動的に採用されます。
+
+### 一覧取得後に別モデルを選ぶ例
+
+`Compatible Endpoint` の `models_json` を `Compatible Model Selector` へ渡し、必要な index を指定して `model_name` を取り出します。取得した名前は別の入力経路で再利用し、ワークフロー側で採用モデルを切り替えます。
 
 ### API キー不要サーバーの例
 

@@ -2,6 +2,7 @@ import base64
 import binascii
 import json
 import math
+import re
 import struct
 import time
 import urllib.error
@@ -304,6 +305,19 @@ def _extract_model_ids(models_response) -> list:
     return model_ids
 
 
+def _extract_model_ids_from_json(models_json: str) -> list:
+    text = str(models_json or "").strip()
+    if not text:
+        return []
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+
+    return _extract_model_ids(parsed)
+
+
 def _normalize_endpoint(endpoint: dict, timeout_seconds=None) -> dict:
     if not isinstance(endpoint, dict):
         raise ValueError("endpoint input must be a COMPATIBLE_ENDPOINT object")
@@ -337,7 +351,16 @@ def _coerce_response_text(content) -> str:
     return ""
 
 
-def _extract_chat_result(response_json: dict) -> tuple[str, str, str]:
+def _strip_think_tags(text: str) -> str:
+    cleaned = str(text or "")
+    if "<think>" in cleaned:
+        cleaned = re.sub(r"<think>.*?</think>\s*", "", cleaned, flags=re.DOTALL)
+    elif "</think>" in cleaned:
+        cleaned = re.sub(r"^.*?</think>\s*", "", cleaned, count=1, flags=re.DOTALL)
+    return cleaned
+
+
+def _extract_chat_result(response_json: dict, strip_think_tags: bool = False) -> tuple[str, str, str]:
     choices = response_json.get("choices")
     if not isinstance(choices, list) or not choices:
         raise RuntimeError("response does not contain choices")
@@ -348,6 +371,8 @@ def _extract_chat_result(response_json: dict) -> tuple[str, str, str]:
     text = _coerce_response_text(content)
     if not text and isinstance(first_choice, dict):
         text = _coerce_response_text(first_choice.get("text"))
+    if strip_think_tags:
+        text = _strip_think_tags(text)
     finish_reason = first_choice.get("finish_reason", "") if isinstance(first_choice, dict) else ""
     usage_json = _json_dumps(response_json.get("usage", {}))
     return text, str(finish_reason or ""), usage_json
@@ -500,7 +525,37 @@ def _build_vision_messages(system_prompt: str, user_prompt: str, image_data_url:
     return messages
 
 
-def _chat_completion_request(endpoint: dict, messages: list, temperature: float, max_tokens: int, top_p=None, seed=None):
+def _parse_extra_body_json(extra_body_json: str, reserved_keys: set[str]) -> dict:
+    text = str(extra_body_json or "").strip()
+    if not text:
+        return {}
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"extra_body_json must be valid JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("extra_body_json must decode to an object")
+
+    collisions = sorted(key for key in parsed.keys() if key in reserved_keys)
+    if collisions:
+        raise ValueError(f"extra_body_json contains reserved keys: {', '.join(collisions)}")
+
+    return parsed
+
+
+def _chat_completion_request(
+    endpoint: dict,
+    messages: list,
+    temperature: float,
+    max_tokens: int,
+    top_p=None,
+    seed=None,
+    extra_body_json="",
+    reserved_extra_keys=None,
+    strip_think_tags: bool = False,
+):
     payload = {
         "model": endpoint["model_name"],
         "messages": messages,
@@ -513,13 +568,16 @@ def _chat_completion_request(endpoint: dict, messages: list, temperature: float,
     if seed is not None:
         payload["seed"] = int(seed)
 
+    extra_body = _parse_extra_body_json(extra_body_json, set(reserved_extra_keys or ()))
+    payload.update(extra_body)
+
     response_json = _http_json_request(
         _build_api_url(endpoint["base_url"], CHAT_COMPLETION_PATH),
         endpoint["api_key"],
         endpoint["timeout_seconds"],
         payload=payload,
     )
-    text, finish_reason, usage_json = _extract_chat_result(response_json)
+    text, finish_reason, usage_json = _extract_chat_result(response_json, strip_think_tags)
     return text, _json_dumps(response_json), finish_reason, usage_json
 
 class MosaicByMask:
@@ -725,9 +783,9 @@ class CompatibleEndpoint:
                     payload=None,
                 )
                 models = _extract_model_ids(models_response)
-                if not selected_model and len(models) == 1:
+                if not selected_model and models:
                     selected_model = models[0]
-                    status_parts.append("single model auto-selected")
+                    status_parts.append("first fetched model auto-selected")
                 status_parts.append(f"models fetched: {len(models)}")
             except Exception as exc:
                 models_response = {"error": str(exc), "data": []}
@@ -751,6 +809,29 @@ class CompatibleEndpoint:
         }
         status_text = " | ".join(part for part in status_parts if part)
         return (endpoint, selected_model, _json_dumps(models_response), status_text)
+
+class CompatibleModelSelector:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "models_json": ("STRING", {"default": "", "multiline": True}),
+                "model_index": ("INT", {"default": 0, "min": 0, "max": 65535, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("model_name",)
+    FUNCTION = "select_model"
+    CATEGORY = "zaknak/llm"
+
+    def select_model(self, models_json, model_index):
+        models = _extract_model_ids_from_json(models_json)
+        index = int(model_index)
+        if index < 0 or index >= len(models):
+            return ("",)
+        return (models[index],)
+
 
 class PromptPreset:
     @classmethod
@@ -795,6 +876,8 @@ class ChatOnce:
                 "max_tokens": ("INT", {"default": 512, "min": 0, "max": 65535, "step": 1}),
                 "top_p": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
+                "extra_body_json": ("STRING", {"default": "", "multiline": True}),
+                "strip_think_tags": ("BOOLEAN", {"default": False}),
                 "timeout_seconds": ("FLOAT", {"default": 60.0, "min": 0.1, "max": 300.0, "step": 0.5}),
             }
         }
@@ -804,7 +887,7 @@ class ChatOnce:
     FUNCTION = "chat"
     CATEGORY = "zaknak/llm"
 
-    def chat(self, endpoint, system_prompt, user_prompt, temperature, max_tokens, top_p, seed, timeout_seconds):
+    def chat(self, endpoint, system_prompt, user_prompt, temperature, max_tokens, top_p, seed, extra_body_json, strip_think_tags, timeout_seconds):
         normalized_endpoint = _normalize_endpoint(endpoint, timeout_seconds)
         messages = _build_chat_messages(system_prompt, user_prompt)
         return _chat_completion_request(
@@ -814,6 +897,9 @@ class ChatOnce:
             int(max_tokens),
             float(top_p),
             int(seed),
+            extra_body_json,
+            {"model", "messages", "temperature", "max_tokens", "top_p", "seed"},
+            bool(strip_think_tags),
         )
 
 
@@ -829,6 +915,9 @@ class VisionChatOnce:
                 "image_detail": (["auto", "low", "high"], {"default": "auto"}),
                 "temperature": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 2.0, "step": 0.05}),
                 "max_tokens": ("INT", {"default": 512, "min": 0, "max": 65535, "step": 1}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
+                "extra_body_json": ("STRING", {"default": "", "multiline": True}),
+                "strip_think_tags": ("BOOLEAN", {"default": False}),
                 "timeout_seconds": ("FLOAT", {"default": 60.0, "min": 0.1, "max": 300.0, "step": 0.5}),
             }
         }
@@ -838,7 +927,7 @@ class VisionChatOnce:
     FUNCTION = "chat"
     CATEGORY = "zaknak/llm"
 
-    def chat(self, endpoint, image, system_prompt, user_prompt, image_detail, temperature, max_tokens, timeout_seconds):
+    def chat(self, endpoint, image, system_prompt, user_prompt, image_detail, temperature, max_tokens, seed, extra_body_json, strip_think_tags, timeout_seconds):
         normalized_endpoint = _normalize_endpoint(endpoint, timeout_seconds)
         if image.shape[0] < 1:
             raise ValueError("image input is empty")
@@ -850,7 +939,10 @@ class VisionChatOnce:
             float(temperature),
             int(max_tokens),
             None,
-            None,
+            int(seed),
+            extra_body_json,
+            {"model", "messages", "temperature", "max_tokens", "seed"},
+            bool(strip_think_tags),
         )
 
 
@@ -858,6 +950,7 @@ NODE_CLASS_MAPPINGS = {
     "MosaicByMask": MosaicByMask,
     "CensorBarsByMask": CensorBarsByMask,
     "CompatibleEndpoint": CompatibleEndpoint,
+    "CompatibleModelSelector": CompatibleModelSelector,
     "PromptPreset": PromptPreset,
     "ChatOnce": ChatOnce,
     "VisionChatOnce": VisionChatOnce,
@@ -867,7 +960,14 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MosaicByMask": "Mosaic By Mask",
     "CensorBarsByMask": "Censor Bars By Mask",
     "CompatibleEndpoint": "Compatible Endpoint",
+    "CompatibleModelSelector": "Compatible Model Selector",
     "PromptPreset": "Prompt Preset",
     "ChatOnce": "Chat Once",
     "VisionChatOnce": "Vision Chat Once",
 }
+
+
+
+
+
+

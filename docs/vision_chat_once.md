@@ -17,13 +17,16 @@
 | `image_detail` | `STRING` | API が対応している場合の画像 detail 指定。`auto` / `low` / `high` |
 | `temperature` | `FLOAT` | 生成の揺らぎを制御する値 |
 | `max_tokens` | `INT` | 出力トークン上限。`0` の場合は body へ含めない |
+| `seed` | `INT` | サーバーが対応している場合に送る乱数シード |
+| `extra_body_json` | `STRING` | POST body へ追加マージする JSON object 文字列。空文字は追加なし |
+| `strip_think_tags` | `BOOLEAN` | `true` の場合、`text` 出力から `<think>` 推論ログ部分を除去する |
 | `timeout_seconds` | `FLOAT` | リクエストのタイムアウト秒数 |
 
 ## 出力
 
 | 名前 | 型 | 説明 |
 | --- | --- | --- |
-| `text` | `STRING` | 応答テキスト |
+| `text` | `STRING` | 応答テキスト。`strip_think_tags=true` の場合は後処理後の文字列 |
 | `response_json` | `STRING` | API 応答全体を JSON 文字列で返したもの |
 | `finish_reason` | `STRING` | 応答終了理由 |
 | `usage_json` | `STRING` | token usage などのメタ情報 |
@@ -34,7 +37,15 @@
 - メッセージ形式は OpenAI 互換の `image_url` 形式を想定します
 - `user_prompt` は画像と一緒に送る補助テキストとして扱います
 - `system_prompt` が空でも送信できます
+- リクエスト body は OpenAI 互換 chat completions 相当の形式を基本とし、`temperature`、`max_tokens`、`seed` を含めて送ります
+- `extra_body_json` が空でなければ JSON として解釈し、JSON object の場合だけ既存 payload へ浅く追加マージします
+- `extra_body_json` が JSON として解釈できない場合はエラーにします
+- `extra_body_json` が object 以外の JSON 値だった場合はエラーにします
+- `extra_body_json` に `model`、`messages`、`temperature`、`max_tokens`、`seed` など既存 payload と衝突するキーが含まれていた場合はエラーにします
 - 応答本文は `choices[0].message.content` を優先して取り出します
+- `strip_think_tags=true` の場合、`text` 出力に対して `<think>...</think>` 区間を削除します
+- 推論開始タグ `<think>` が無く、`</think>` だけが出力される不正系では、先頭から最初の `</think>` までを推論ログとして削除し、その直後の改行・空白も削除します
+- `response_json` はデバッグ用の生レスポンスとして残し、`strip_think_tags` の影響を受けません
 
 ## 使用例
 
@@ -46,10 +57,27 @@ ComfyUI で生成した画像をそのまま `image` へ渡し、「この画像
 
 画像入力に対して `Prompt Preset` からタグ抽出用 prompt を与え、VLM にタグやキャプションを生成させます。
 
+### 再現性を狙う例
+
+同じ画像、同じ prompt、同じ generation パラメータで比較したい場合は `seed` を固定し、接続先が対応していれば再現性のある応答傾向を狙えます。
+
+### 追加オプション付与の例
+
+`extra_body_json` に `{"response_format":{"type":"json_object"}}` のような JSON object を入れると、画像付き payload に追加パラメータを付けて送信できます。
+
+### 推論ログ除去の例
+
+推論ログを `<think>...</think>` で返すモデルを使う場合、`strip_think_tags=true` にすると `text` 出力だけを整形し、本文だけを後続ノードへ渡せます。
+
 ## 注意点 / 制約
 
 - すべての OpenAI 互換 API サーバーが画像入力形式に対応しているわけではありません
 - 画像対応モデルと非対応モデルがあるため、モデル選択だけでは成功可否を保証できない場合があります
 - 現在の実装は複数画像、動画、フレーム列に対応しません
 - 画像バッチが複数枚でも、先頭 1 枚だけを使用します
+- `seed` はサーバー非対応の可能性があります
+- `extra_body_json` は JSON object のみを受け付けます
+- `extra_body_json` で既存 payload キーを上書きすることはできません
+- `strip_think_tags` の既定値は `false` です
+- `strip_think_tags` は `text` 出力だけに適用され、`response_json` は変更しません
 - 画像非対応モデルや接続先仕様差異による失敗時は例外になります
