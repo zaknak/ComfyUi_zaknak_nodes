@@ -1,11 +1,30 @@
+import base64
+import binascii
+import json
 import math
+import re
+import struct
 import time
+import urllib.error
+import urllib.request
+import zlib
+from string import Formatter
 
 import torch
 import torch.nn.functional as F
 
 
 MASK_BATCH_MODES = ["match_image_batch", "merge_batch_to_one"]
+CHAT_COMPLETION_PATH = "/chat/completions"
+MODELS_PATH = "/models"
+DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
+CUSTOM_TYPE_ENDPOINT = "COMPATIBLE_ENDPOINT"
+
+
+try:
+    import yaml  # type: ignore
+except ImportError:
+    yaml = None
 
 
 def _normalize_mask_shape(mask: torch.Tensor) -> torch.Tensor:
@@ -213,11 +232,353 @@ def _build_censor_overlay(
         "crop_height": crop_height,
     }
 
-
 def _log_timing(stage: str, elapsed: float, details: str = "") -> None:
     suffix = f" | {details}" if details else ""
     print(f"[CensorBarsByMask] {stage}: {elapsed * 1000.0:.2f} ms{suffix}")
 
+
+def _json_dumps(value) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+def _normalize_base_url(base_url: str) -> str:
+    normalized = str(base_url or "").strip()
+    if not normalized:
+        raise ValueError("base_url is required")
+    return normalized.rstrip("/")
+
+
+def _build_api_url(base_url: str, path: str) -> str:
+    return f"{_normalize_base_url(base_url)}{path}"
+
+
+def _build_headers(api_key: str) -> dict:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    token = str(api_key or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _http_json_request(url: str, api_key: str, timeout_seconds: float, payload=None):
+    data = None
+    method = "GET"
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        method = "POST"
+    request = urllib.request.Request(url=url, data=data, headers=_build_headers(api_key), method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=max(float(timeout_seconds), 0.1)) as response:
+            response_bytes = response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} for {url}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"request failed for {url}: {exc.reason}") from exc
+
+    try:
+        return json.loads(response_bytes.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid JSON response from {url}: {exc}") from exc
+
+
+def _extract_model_ids(models_response) -> list:
+    if isinstance(models_response, dict):
+        items = models_response.get("data", models_response.get("models", []))
+    else:
+        items = models_response
+
+    if not isinstance(items, list):
+        return []
+
+    model_ids = []
+    for item in items:
+        if isinstance(item, dict):
+            model_id = item.get("id") or item.get("name")
+        else:
+            model_id = item
+        if isinstance(model_id, str) and model_id.strip():
+            model_ids.append(model_id.strip())
+    return model_ids
+
+
+def _extract_model_ids_from_json(models_json: str) -> list:
+    text = str(models_json or "").strip()
+    if not text:
+        return []
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+
+    return _extract_model_ids(parsed)
+
+
+def _normalize_endpoint(endpoint: dict, timeout_seconds=None) -> dict:
+    if not isinstance(endpoint, dict):
+        raise ValueError("endpoint input must be a COMPATIBLE_ENDPOINT object")
+    normalized = dict(endpoint)
+    normalized["base_url"] = _normalize_base_url(normalized.get("base_url", ""))
+    normalized["api_key"] = str(normalized.get("api_key", ""))
+    normalized["model_name"] = str(normalized.get("model_name", "")).strip()
+    if not normalized["model_name"]:
+        raise ValueError("model_name is required on endpoint")
+    if timeout_seconds is not None:
+        normalized["timeout_seconds"] = float(timeout_seconds)
+    else:
+        normalized["timeout_seconds"] = float(normalized.get("timeout_seconds", 30.0))
+    return normalized
+
+
+def _coerce_response_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif item.get("type") == "text" and isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+        return "\n".join(part for part in parts if part)
+    return ""
+
+
+def _strip_think_tags(text: str) -> str:
+    cleaned = str(text or "")
+    if "<think>" in cleaned:
+        cleaned = re.sub(r"<think>.*?</think>\s*", "", cleaned, flags=re.DOTALL)
+    elif "</think>" in cleaned:
+        cleaned = re.sub(r"^.*?</think>\s*", "", cleaned, count=1, flags=re.DOTALL)
+    return cleaned
+
+
+def _extract_chat_result(response_json: dict, strip_think_tags: bool = False) -> tuple[str, str, str]:
+    choices = response_json.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("response does not contain choices")
+
+    first_choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
+    content = message.get("content") if isinstance(message, dict) else None
+    text = _coerce_response_text(content)
+    if not text and isinstance(first_choice, dict):
+        text = _coerce_response_text(first_choice.get("text"))
+    if strip_think_tags:
+        text = _strip_think_tags(text)
+    finish_reason = first_choice.get("finish_reason", "") if isinstance(first_choice, dict) else ""
+    usage_json = _json_dumps(response_json.get("usage", {}))
+    return text, str(finish_reason or ""), usage_json
+
+
+def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    crc = binascii.crc32(chunk_type + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + chunk_type + data + struct.pack(">I", crc)
+
+
+def _encode_image_to_png_bytes(image: torch.Tensor) -> bytes:
+    if image.dim() != 3:
+        raise ValueError("image tensor must be [H, W, C]")
+    height, width, channels = image.shape
+    if channels < 3:
+        raise ValueError("image tensor must have at least 3 channels")
+
+    rgb = image[..., :3].detach().cpu().clamp(0.0, 1.0).mul(255.0).round().to(torch.uint8).contiguous()
+    rows = []
+    for row_index in range(height):
+        row_bytes = bytes(rgb[row_index].reshape(-1).tolist())
+        rows.append(b"\x00" + row_bytes)
+    raw = b"".join(rows)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"".join(
+        [
+            b"\x89PNG\r\n\x1a\n",
+            _png_chunk(b"IHDR", ihdr),
+            _png_chunk(b"IDAT", zlib.compress(raw)),
+            _png_chunk(b"IEND", b""),
+        ]
+    )
+
+
+def _encode_image_to_data_url(image: torch.Tensor) -> str:
+    encoded = base64.b64encode(_encode_image_to_png_bytes(image)).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _load_text_file(path: str):
+    file_path = str(path or "").strip()
+    if not file_path:
+        raise ValueError("preset_path is required")
+    with open(file_path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+
+    lowered = file_path.lower()
+    if lowered.endswith(".json"):
+        return json.loads(text)
+    if lowered.endswith((".yaml", ".yml")):
+        if yaml is None:
+            raise RuntimeError("YAML presets require PyYAML to be installed; use JSON or install PyYAML")
+        return yaml.safe_load(text)
+    raise ValueError("preset_path must end with .json, .yaml, or .yml")
+
+
+def _resolve_preset_definition(document, preset_id: str) -> dict:
+    target = str(preset_id or "").strip()
+    if not target:
+        raise ValueError("preset_id is required")
+
+    if isinstance(document, dict):
+        if target in document and isinstance(document[target], dict):
+            preset = dict(document[target])
+            preset.setdefault("id", target)
+            return preset
+        presets = document.get("presets")
+        if isinstance(presets, dict) and target in presets and isinstance(presets[target], dict):
+            preset = dict(presets[target])
+            preset.setdefault("id", target)
+            return preset
+        if isinstance(presets, list):
+            document = presets
+        else:
+            document = [document]
+
+    if isinstance(document, list):
+        for item in document:
+            if not isinstance(item, dict):
+                continue
+            if item.get("id") == target:
+                return dict(item)
+
+    raise ValueError(f"preset_id not found: {target}")
+
+
+def _validate_template_variables(template: str, variables: dict) -> None:
+    missing = []
+    for _, field_name, _, _ in Formatter().parse(template):
+        if field_name and field_name not in variables:
+            missing.append(field_name)
+    if missing:
+        unique_missing = sorted(set(missing))
+        raise ValueError(f"missing template variables: {', '.join(unique_missing)}")
+
+
+def _build_user_prompt(preset: dict, variables_json: str, fallback_user_prompt: str) -> str:
+    fallback = str(fallback_user_prompt or "")
+    explicit_user_prompt = preset.get("user_prompt")
+    if isinstance(explicit_user_prompt, str) and explicit_user_prompt:
+        return explicit_user_prompt
+
+    template = str(preset.get("user_template", "") or "")
+    if not template:
+        return fallback
+
+    variables_text = str(variables_json or "").strip()
+    variables = {}
+    if variables_text:
+        try:
+            variables = json.loads(variables_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"variables_json must be valid JSON: {exc}") from exc
+        if not isinstance(variables, dict):
+            raise ValueError("variables_json must decode to an object")
+
+    _validate_template_variables(template, variables)
+    return template.format_map(variables)
+
+
+def _build_chat_messages(system_prompt: str, user_prompt: str) -> list:
+    messages = []
+    if str(system_prompt or ""):
+        messages.append({"role": "system", "content": str(system_prompt)})
+    if str(user_prompt or ""):
+        messages.append({"role": "user", "content": str(user_prompt)})
+    if not messages:
+        raise ValueError("at least one of system_prompt or user_prompt must be provided")
+    return messages
+
+
+def _build_vision_messages(system_prompt: str, user_prompt: str, image_data_url: str, image_detail: str) -> list:
+    messages = []
+    if str(system_prompt or ""):
+        messages.append({"role": "system", "content": str(system_prompt)})
+
+    user_content = []
+    if str(user_prompt or ""):
+        user_content.append({"type": "text", "text": str(user_prompt)})
+    user_content.append(
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": image_data_url,
+                "detail": str(image_detail),
+            },
+        }
+    )
+    messages.append({"role": "user", "content": user_content})
+    return messages
+
+
+def _parse_extra_body_json(extra_body_json: str, reserved_keys: set[str]) -> dict:
+    text = str(extra_body_json or "").strip()
+    if not text:
+        return {}
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"extra_body_json must be valid JSON: {exc}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("extra_body_json must decode to an object")
+
+    collisions = sorted(key for key in parsed.keys() if key in reserved_keys)
+    if collisions:
+        raise ValueError(f"extra_body_json contains reserved keys: {', '.join(collisions)}")
+
+    return parsed
+
+
+def _chat_completion_request(
+    endpoint: dict,
+    messages: list,
+    temperature: float,
+    max_tokens: int,
+    top_p=None,
+    seed=None,
+    extra_body_json="",
+    reserved_extra_keys=None,
+    strip_think_tags: bool = False,
+):
+    payload = {
+        "model": endpoint["model_name"],
+        "messages": messages,
+        "temperature": float(temperature),
+    }
+    if max_tokens > 0:
+        payload["max_tokens"] = int(max_tokens)
+    if top_p is not None:
+        payload["top_p"] = float(top_p)
+    if seed is not None:
+        payload["seed"] = int(seed)
+
+    extra_body = _parse_extra_body_json(extra_body_json, set(reserved_extra_keys or ()))
+    payload.update(extra_body)
+
+    response_json = _http_json_request(
+        _build_api_url(endpoint["base_url"], CHAT_COMPLETION_PATH),
+        endpoint["api_key"],
+        endpoint["timeout_seconds"],
+        payload=payload,
+    )
+    text, finish_reason, usage_json = _extract_chat_result(response_json, strip_think_tags)
+    return text, _json_dumps(response_json), finish_reason, usage_json
 
 class MosaicByMask:
     @classmethod
@@ -388,13 +749,225 @@ class CensorBarsByMask:
         return (blended.movedim(1, -1).clamp(0.0, 1.0),)
 
 
+class CompatibleEndpoint:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "base_url": ("STRING", {"default": DEFAULT_BASE_URL}),
+                "api_key": ("STRING", {"default": ""}),
+                "model_name": ("STRING", {"default": ""}),
+                "refresh_models": ("BOOLEAN", {"default": True}),
+                "timeout_seconds": ("FLOAT", {"default": 10.0, "min": 0.1, "max": 300.0, "step": 0.5}),
+            }
+        }
+
+    RETURN_TYPES = (CUSTOM_TYPE_ENDPOINT, "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("endpoint", "model_name", "models_json", "status_text")
+    FUNCTION = "build"
+    CATEGORY = "zaknak/llm"
+
+    def build(self, base_url, api_key, model_name, refresh_models, timeout_seconds):
+        normalized_base_url = _normalize_base_url(base_url)
+        selected_model = str(model_name or "").strip()
+        models_response = {"data": []}
+        status_parts = []
+        models = []
+
+        if refresh_models:
+            try:
+                models_response = _http_json_request(
+                    _build_api_url(normalized_base_url, MODELS_PATH),
+                    str(api_key or ""),
+                    float(timeout_seconds),
+                    payload=None,
+                )
+                models = _extract_model_ids(models_response)
+                if not selected_model and models:
+                    selected_model = models[0]
+                    status_parts.append("first fetched model auto-selected")
+                status_parts.append(f"models fetched: {len(models)}")
+            except Exception as exc:
+                models_response = {"error": str(exc), "data": []}
+                status_parts.append(f"model fetch failed: {exc}")
+        else:
+            status_parts.append("model fetch skipped")
+
+        if not selected_model:
+            status_parts.append("model_name is empty")
+        elif models and selected_model not in models:
+            status_parts.append("model_name not found in fetched models")
+        else:
+            status_parts.append(f"model_name={selected_model}" if selected_model else "")
+
+        endpoint = {
+            "base_url": normalized_base_url,
+            "api_key": str(api_key or ""),
+            "model_name": selected_model,
+            "timeout_seconds": float(timeout_seconds),
+            "models": models,
+        }
+        status_text = " | ".join(part for part in status_parts if part)
+        return (endpoint, selected_model, _json_dumps(models_response), status_text)
+
+class CompatibleModelSelector:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "models_json": ("STRING", {"default": "", "multiline": True}),
+                "model_index": ("INT", {"default": 0, "min": 0, "max": 65535, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("model_name",)
+    FUNCTION = "select_model"
+    CATEGORY = "zaknak/llm"
+
+    def select_model(self, models_json, model_index):
+        models = _extract_model_ids_from_json(models_json)
+        index = int(model_index)
+        if index < 0 or index >= len(models):
+            return ("",)
+        return (models[index],)
+
+
+class PromptPreset:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "preset_path": ("STRING", {"default": ""}),
+                "preset_id": ("STRING", {"default": ""}),
+                "variables_json": ("STRING", {"default": "{}", "multiline": True}),
+                "fallback_user_prompt": ("STRING", {"default": "", "multiline": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("system_prompt", "user_prompt", "preset_meta_json", "preset_name")
+    FUNCTION = "load_preset"
+    CATEGORY = "zaknak/llm"
+
+    def load_preset(self, preset_path, preset_id, variables_json, fallback_user_prompt):
+        document = _load_text_file(preset_path)
+        preset = _resolve_preset_definition(document, preset_id)
+        system_prompt = str(preset.get("system_prompt", "") or "")
+        user_prompt = _build_user_prompt(preset, variables_json, fallback_user_prompt)
+        preset_name = str(preset.get("label") or preset.get("name") or preset.get("id") or preset_id)
+        preset_meta = {
+            key: value
+            for key, value in preset.items()
+            if key not in {"system_prompt", "user_template", "user_prompt"}
+        }
+        return (system_prompt, user_prompt, _json_dumps(preset_meta), preset_name)
+
+
+class ChatOnce:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "endpoint": (CUSTOM_TYPE_ENDPOINT,),
+                "system_prompt": ("STRING", {"default": "", "multiline": True}),
+                "user_prompt": ("STRING", {"default": "", "multiline": True}),
+                "temperature": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "max_tokens": ("INT", {"default": 512, "min": 0, "max": 65535, "step": 1}),
+                "top_p": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
+                "extra_body_json": ("STRING", {"default": "", "multiline": True}),
+                "strip_think_tags": ("BOOLEAN", {"default": False}),
+                "timeout_seconds": ("FLOAT", {"default": 60.0, "min": 0.1, "max": 300.0, "step": 0.5}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("text", "response_json", "finish_reason", "usage_json")
+    FUNCTION = "chat"
+    CATEGORY = "zaknak/llm"
+
+    def chat(self, endpoint, system_prompt, user_prompt, temperature, max_tokens, top_p, seed, extra_body_json, strip_think_tags, timeout_seconds):
+        normalized_endpoint = _normalize_endpoint(endpoint, timeout_seconds)
+        messages = _build_chat_messages(system_prompt, user_prompt)
+        return _chat_completion_request(
+            normalized_endpoint,
+            messages,
+            float(temperature),
+            int(max_tokens),
+            float(top_p),
+            int(seed),
+            extra_body_json,
+            {"model", "messages", "temperature", "max_tokens", "top_p", "seed"},
+            bool(strip_think_tags),
+        )
+
+
+class VisionChatOnce:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "endpoint": (CUSTOM_TYPE_ENDPOINT,),
+                "image": ("IMAGE",),
+                "system_prompt": ("STRING", {"default": "", "multiline": True}),
+                "user_prompt": ("STRING", {"default": "", "multiline": True}),
+                "image_detail": (["auto", "low", "high"], {"default": "auto"}),
+                "temperature": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "max_tokens": ("INT", {"default": 512, "min": 0, "max": 65535, "step": 1}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
+                "extra_body_json": ("STRING", {"default": "", "multiline": True}),
+                "strip_think_tags": ("BOOLEAN", {"default": False}),
+                "timeout_seconds": ("FLOAT", {"default": 60.0, "min": 0.1, "max": 300.0, "step": 0.5}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("text", "response_json", "finish_reason", "usage_json")
+    FUNCTION = "chat"
+    CATEGORY = "zaknak/llm"
+
+    def chat(self, endpoint, image, system_prompt, user_prompt, image_detail, temperature, max_tokens, seed, extra_body_json, strip_think_tags, timeout_seconds):
+        normalized_endpoint = _normalize_endpoint(endpoint, timeout_seconds)
+        if image.shape[0] < 1:
+            raise ValueError("image input is empty")
+        image_data_url = _encode_image_to_data_url(image[0])
+        messages = _build_vision_messages(system_prompt, user_prompt, image_data_url, image_detail)
+        return _chat_completion_request(
+            normalized_endpoint,
+            messages,
+            float(temperature),
+            int(max_tokens),
+            None,
+            int(seed),
+            extra_body_json,
+            {"model", "messages", "temperature", "max_tokens", "seed"},
+            bool(strip_think_tags),
+        )
+
+
 NODE_CLASS_MAPPINGS = {
     "MosaicByMask": MosaicByMask,
     "CensorBarsByMask": CensorBarsByMask,
+    "CompatibleEndpoint": CompatibleEndpoint,
+    "CompatibleModelSelector": CompatibleModelSelector,
+    "PromptPreset": PromptPreset,
+    "ChatOnce": ChatOnce,
+    "VisionChatOnce": VisionChatOnce,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MosaicByMask": "Mosaic By Mask",
     "CensorBarsByMask": "Censor Bars By Mask",
+    "CompatibleEndpoint": "Compatible Endpoint",
+    "CompatibleModelSelector": "Compatible Model Selector",
+    "PromptPreset": "Prompt Preset",
+    "ChatOnce": "Chat Once",
+    "VisionChatOnce": "Vision Chat Once",
 }
+
+
+
+
+
 
