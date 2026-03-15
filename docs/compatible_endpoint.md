@@ -36,7 +36,7 @@
 - モデル一覧取得に失敗または非対応の場合でも、`model_name` の手動入力で利用を継続できます
 - `api_key` が空でも接続先が受け付ける場合はそのまま利用できます
 - `status_text` には取得件数、既定値の自動採用有無、手入力モデルの妥当性などを要約します
-- より明示的に別モデルを選びたい場合は、`models_json` を `Compatible Model Selector` へ渡して `model_name` を選択します
+- より明示的に別モデルを選びたい場合は、`models_json` を `Compatible Model List View` と `Compatible Model Selector` へ渡し、一覧確認と選択を分離できます
 
 ## 使用例
 
@@ -46,7 +46,7 @@
 
 ### 一覧取得後に別モデルを選ぶ例
 
-`Compatible Endpoint` の `models_json` を `Compatible Model Selector` へ渡し、必要な index を指定して `model_name` を取り出します。取得した名前は別の入力経路で再利用し、ワークフロー側で採用モデルを切り替えます。
+`Compatible Endpoint` の `models_json` を `Compatible Model List View` へ渡すと、`index: model_name` の一覧文字列を確認できます。同じ `models_json` を `Compatible Model Selector` へも渡し、必要な `model_index` を指定して `model_name` を取り出します。取得した名前は別の入力経路で再利用し、ワークフロー側で採用モデルを切り替えます。
 
 ### API キー不要サーバーの例
 

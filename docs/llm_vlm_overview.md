@@ -41,7 +41,7 @@
 
 ### モデル選択ノード
 
-取得済みの `models_json` から明示的に別モデルを選びたい場合は、`Compatible Model Selector` を使います。ComfyUI 標準 UI の制約上、現在は動的ドロップダウンではなく index 指定でモデル名を取り出します。
+取得済みの `models_json` から明示的に別モデルを選びたい場合は、一覧確認用の `Compatible Model List View` と選択用の `Compatible Model Selector` を組み合わせます。ComfyUI 標準 UI の制約上、現在は動的ドロップダウンではなく index 指定でモデル名を取り出します。
 
 ### プリセットノード
 
@@ -49,11 +49,11 @@ prompt プリセットは送信ノードへ内蔵せず、外部ファイルか�
 
 ### 単発送信ノード
 
-単発のテキストチャットは独立した 1 回のリクエストとして扱います。履歴状態を持たせず、ComfyUI のワークフロー内で明快に使えることを優先します。generation パラメータとして `temperature`、`max_tokens`、`top_p`、`seed` を扱います。加えて `extra_body_json` により、既存 payload と衝突しない追加 body パラメータを JSON object で指定できます。`text` 出力には任意の後処理オプションを持てるものとし、`strip_think_tags` は `<think>` 推論ログを除去する整形機能として扱います。
+単発のテキストチャットは独立した 1 回のリクエストとして扱います。履歴状態を持たせず、ComfyUI のワークフロー内で明快に使えることを優先します。ノード入力としては `max_tokens` と `seed` を扱い、`max_tokens` の既定値は `10240` とします。`temperature` や `top_p` のような追加 generation パラメータは `extra_body_json` で任意に指定できます。さらに `strict_finish_reason` により、`finish_reason` が `stop` 以外だった応答をエラーとして扱えるようにします。`text` 出力には任意の後処理オプションを持てるものとし、`strip_think_tags` は `<think>` 推論ログを除去する整形機能として扱います。
 
 ### 画像付き送信ノード
 
-VLM 向けの画像付き送信は、テキスト専用ノードと分離します。画像は ComfyUI `IMAGE` バッチの先頭 1 枚を PNG 化して data URL として送ります。generation パラメータとして `temperature`、`max_tokens`、`seed` を扱います。加えて `extra_body_json` により、既存 payload と衝突しない追加 body パラメータを JSON object で指定できます。`strip_think_tags` は `text` 出力だけを整形し、API 生レスポンスは保持します。
+VLM 向けの画像付き送信は、テキスト専用ノードと分離します。画像は ComfyUI `IMAGE` バッチの先頭 1 枚を PNG 化して data URL として送ります。ノード入力としては `max_tokens` と `seed` を扱い、`max_tokens` の既定値は `10240` とします。追加 generation パラメータは `extra_body_json` で任意に指定できます。`strict_finish_reason` は `text` 応答の正常終了判定に使い、`strip_think_tags` は `text` 出力だけを整形し、API 生レスポンスは保持します。
 
 ### 履歴付きチャット
 
@@ -63,10 +63,14 @@ VLM 向けの画像付き送信は、テキスト専用ノードと分離しま�
 
 - UI は ComfyUI 標準のノード UI を前提とします
 - `Compatible Endpoint` はベース URL、API キー、`model_name`、モデル一覧再取得フラグを中心に構成します
+- `Compatible Model List View` は `models_json` から index とモデル名の対応一覧を文字列で返します
 - `Compatible Model Selector` は `models_json` と index 入力から `model_name` を返します
 - 送信ノードは prompt 入力を主役にし、接続設定を重複させません
 - `extra_body_json` は JSON object 文字列のみ受け付け、空文字は追加なしとして扱います
 - `extra_body_json` で既存 payload キーと衝突する指定はエラーにします
+- `extra_body_json` により、UI に出さない generation パラメータを追加指定できます
+- `strict_finish_reason` は `BOOLEAN` 入力で、既定値は `true` とします
+- `strict_finish_reason=true` の場合、`finish_reason` が `stop` 以外ならエラーにします
 - `strip_think_tags` は `BOOLEAN` 入力で、既定値は `false` とします
 - `strip_think_tags` は `text` 出力だけに適用し、`response_json` は生レスポンスとして保持します
 - テキスト応答は `STRING` を主出力とします
@@ -79,7 +83,7 @@ VLM 向けの画像付き送信は、テキスト専用ノードと分離しま�
 - `Compatible Endpoint` はその結果を `models_json` と `status_text` で返します
 - `model_name` が空でモデル一覧取得に成功した場合は、先頭モデルを既定値として採用します
 - 接続先が非対応、失敗、または一時的に取得できない場合でも、手動で `model_name` を入力して利用できます
-- 取得済み一覧から明示的に選びたい場合は `Compatible Model Selector` を使います
+- 取得済み一覧から明示的に選びたい場合は `Compatible Model List View` で index 対応を確認し、`Compatible Model Selector` で選択します
 
 ## プリセット方針
 
@@ -106,6 +110,7 @@ VLM 向けの画像付き送信は、テキスト専用ノードと分離しま�
 - `extra_body_json` の不正 JSON
 - `extra_body_json` の型不正
 - `extra_body_json` と既存 payload のキー衝突
+- `strict_finish_reason=true` における `finish_reason != "stop"`
 
 モデル一覧取得失敗は手動モデル指定へのフォールバックを基本とします。一方、送信ノード実行時に `model_name` が空ならエラーにします。`strip_think_tags` はレスポンス整形であり、推論ログが存在しない場合でもエラーにはしません。
 
@@ -126,6 +131,7 @@ Compatible LLM / VLM 系の実装は追加依存を避け、HTTP 通信と画像
 ## 関連ドキュメント
 
 - [Compatible Endpoint](compatible_endpoint.md)
+- [Compatible Model List View](compatible_model_list_view.md)
 - [Compatible Model Selector](compatible_model_selector.md)
 - [Prompt Preset](prompt_preset.md)
 - [Chat Once](chat_once.md)
