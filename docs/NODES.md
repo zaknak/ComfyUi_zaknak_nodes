@@ -20,6 +20,7 @@
 
 - [Compatible LLM / VLM Overview](llm_vlm_overview.md): OpenAI 互換 API を使うノード群の目的、責務分離、MVP 範囲、共通方針
 - [Compatible Endpoint](compatible_endpoint.md): 接続先設定、モデル一覧取得、既定モデルの決定を扱う
+- [Compatible Model List View](compatible_model_list_view.md): `models_json` を `index: model_name` の一覧文字列へ整形して確認しやすくする
 - [Compatible Model Selector](compatible_model_selector.md): `models_json` から index 指定で `model_name` を選ぶ
 - [Prompt Preset](prompt_preset.md): 外部 JSON ベース、または PyYAML 利用時の YAML ベースで prompt プリセットを扱う
 - [Chat Once](chat_once.md): 単発のテキストチャット送信を扱う

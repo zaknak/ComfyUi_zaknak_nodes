@@ -13,11 +13,10 @@
 | `endpoint` | `COMPATIBLE_ENDPOINT` | 接続先設定ノードが出力した接続情報 |
 | `system_prompt` | `STRING` | system role 用の prompt |
 | `user_prompt` | `STRING` | user role 用の prompt |
-| `temperature` | `FLOAT` | 生成の揺らぎを制御する値 |
-| `max_tokens` | `INT` | 出力トークン上限。`0` の場合は body へ含めない |
-| `top_p` | `FLOAT` | nucleus sampling 用パラメータ |
+| `max_tokens` | `INT` | 出力トークン上限。既定値は `10240`。`0` の場合は body へ含めない |
 | `seed` | `INT` | サーバーが対応している場合に送る乱数シード |
 | `extra_body_json` | `STRING` | POST body へ追加マージする JSON object 文字列。空文字は追加なし |
+| `strict_finish_reason` | `BOOLEAN` | `true` の場合、`finish_reason` が厳密に `stop` でなければエラーにする |
 | `strip_think_tags` | `BOOLEAN` | `true` の場合、`text` 出力から `<think>` 推論ログ部分を除去する |
 | `timeout_seconds` | `FLOAT` | リクエストのタイムアウト秒数 |
 
@@ -35,12 +34,16 @@
 - このノードは毎回独立した単発リクエストを送ります
 - `endpoint` からベース URL、API キー、選択モデルを受け取ります
 - request body は OpenAI 互換 chat completions 相当の形式を基本とします
+- 通常の request body には `max_tokens` と `seed` を含めます
 - `system_prompt` と `user_prompt` の両方が空ならエラーにします
 - `extra_body_json` が空でなければ JSON として解釈し、JSON object の場合だけ既存 payload へ浅く追加マージします
 - `extra_body_json` が JSON として解釈できない場合はエラーにします
 - `extra_body_json` が object 以外の JSON 値だった場合はエラーにします
-- `extra_body_json` に `model`、`messages`、`temperature`、`max_tokens`、`top_p`、`seed` など既存 payload と衝突するキーが含まれていた場合はエラーにします
+- `extra_body_json` に `model`、`messages`、`max_tokens`、`seed` など既存 payload と衝突するキーが含まれていた場合はエラーにします
+- `extra_body_json` では `temperature` と `top_p` を追加指定できます
 - 応答本文は `choices[0].message.content` を優先して取り出し、配列形式の content もテキスト連結して扱います
+- `strict_finish_reason=true` の場合、`finish_reason` が厳密に `stop` のときだけ成功とし、それ以外はエラーとして実行を中断します
+- `strict_finish_reason=false` の場合、`finish_reason` は検証せずそのまま出力します
 - `strip_think_tags=true` の場合、`text` 出力に対して `<think>...</think>` 区間を削除します
 - 推論開始タグ `<think>` が無く、`</think>` だけが出力される不正系では、先頭から最初の `</think>` までを推論ログとして削除し、その直後の改行・空白も削除します
 - `response_json` はデバッグや後続ノード利用向けに生に近い情報を残し、`strip_think_tags` の影響を受けません
@@ -57,7 +60,7 @@
 
 ### 追加オプション付与の例
 
-`extra_body_json` に `{"response_format":{"type":"json_object"}}` のような JSON object を入れると、標準入力で構成した payload に追加パラメータを付けて送信できます。
+`extra_body_json` に `{"response_format":{"type":"json_object"},"temperature":0.7,"top_p":0.9}` のような JSON object を入れると、標準入力で構成した payload に追加パラメータを付けて送信できます。
 
 ### 推論ログ除去の例
 
@@ -70,7 +73,10 @@
 - すべての OpenAI 互換サーバーが同じ generation パラメータを受け付けるとは限りません
 - `seed` はサーバー非対応の可能性があります
 - `extra_body_json` は JSON object のみを受け付けます
-- `extra_body_json` で既存 payload キーを上書きすることはできません
+- `extra_body_json` で `model`、`messages`、`max_tokens`、`seed` を上書きすることはできません
+- `temperature` と `top_p` はノード入力にはありませんが、必要なら `extra_body_json` で追加指定できます
+- `strict_finish_reason` の既定値は `true` です
+- `strict_finish_reason=true` の場合、`finish_reason` が `stop` 以外、空文字、未設定ならエラーになります
 - `strip_think_tags` の既定値は `false` です
 - `strip_think_tags` は `text` 出力だけに適用され、`response_json` は変更しません
 - `Compatible Endpoint` の既定モデル採用や手動入力の結果として `endpoint.model_name` が空でなければ送信できます

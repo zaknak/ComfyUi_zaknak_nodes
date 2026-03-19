@@ -318,6 +318,10 @@ def _extract_model_ids_from_json(models_json: str) -> list:
     return _extract_model_ids(parsed)
 
 
+def _format_model_index_entries(models: list) -> str:
+    return "\n".join(f"{index}: {model_name}" for index, model_name in enumerate(models))
+
+
 def _normalize_endpoint(endpoint: dict, timeout_seconds=None) -> dict:
     if not isinstance(endpoint, dict):
         raise ValueError("endpoint input must be a COMPATIBLE_ENDPOINT object")
@@ -504,7 +508,7 @@ def _build_chat_messages(system_prompt: str, user_prompt: str) -> list:
     return messages
 
 
-def _build_vision_messages(system_prompt: str, user_prompt: str, image_data_url: str, image_detail: str) -> list:
+def _build_vision_messages(system_prompt: str, user_prompt: str, image_data_url: str) -> list:
     messages = []
     if str(system_prompt or ""):
         messages.append({"role": "system", "content": str(system_prompt)})
@@ -517,7 +521,6 @@ def _build_vision_messages(system_prompt: str, user_prompt: str, image_data_url:
             "type": "image_url",
             "image_url": {
                 "url": image_data_url,
-                "detail": str(image_detail),
             },
         }
     )
@@ -548,23 +551,19 @@ def _parse_extra_body_json(extra_body_json: str, reserved_keys: set[str]) -> dic
 def _chat_completion_request(
     endpoint: dict,
     messages: list,
-    temperature: float,
     max_tokens: int,
-    top_p=None,
     seed=None,
     extra_body_json="",
     reserved_extra_keys=None,
     strip_think_tags: bool = False,
+    strict_finish_reason: bool = True,
 ):
     payload = {
         "model": endpoint["model_name"],
         "messages": messages,
-        "temperature": float(temperature),
     }
     if max_tokens > 0:
         payload["max_tokens"] = int(max_tokens)
-    if top_p is not None:
-        payload["top_p"] = float(top_p)
     if seed is not None:
         payload["seed"] = int(seed)
 
@@ -578,6 +577,8 @@ def _chat_completion_request(
         payload=payload,
     )
     text, finish_reason, usage_json = _extract_chat_result(response_json, strip_think_tags)
+    if strict_finish_reason and finish_reason != "stop":
+        raise RuntimeError(f"finish_reason must be 'stop', got: {finish_reason!r}")
     return text, _json_dumps(response_json), finish_reason, usage_json
 
 class MosaicByMask:
@@ -833,6 +834,25 @@ class CompatibleModelSelector:
         return (models[index],)
 
 
+class CompatibleModelListView:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "models_json": ("STRING", {"default": "", "multiline": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("models_list_text",)
+    FUNCTION = "build_list"
+    CATEGORY = "zaknak/llm"
+
+    def build_list(self, models_json):
+        models = _extract_model_ids_from_json(models_json)
+        return (_format_model_index_entries(models),)
+
+
 class PromptPreset:
     @classmethod
     def INPUT_TYPES(cls):
@@ -872,11 +892,10 @@ class ChatOnce:
                 "endpoint": (CUSTOM_TYPE_ENDPOINT,),
                 "system_prompt": ("STRING", {"default": "", "multiline": True}),
                 "user_prompt": ("STRING", {"default": "", "multiline": True}),
-                "temperature": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "max_tokens": ("INT", {"default": 512, "min": 0, "max": 65535, "step": 1}),
-                "top_p": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "max_tokens": ("INT", {"default": 10240, "min": 0, "max": 65535, "step": 1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
                 "extra_body_json": ("STRING", {"default": "", "multiline": True}),
+                "strict_finish_reason": ("BOOLEAN", {"default": True}),
                 "strip_think_tags": ("BOOLEAN", {"default": False}),
                 "timeout_seconds": ("FLOAT", {"default": 60.0, "min": 0.1, "max": 300.0, "step": 0.5}),
             }
@@ -887,19 +906,18 @@ class ChatOnce:
     FUNCTION = "chat"
     CATEGORY = "zaknak/llm"
 
-    def chat(self, endpoint, system_prompt, user_prompt, temperature, max_tokens, top_p, seed, extra_body_json, strip_think_tags, timeout_seconds):
+    def chat(self, endpoint, system_prompt, user_prompt, max_tokens, seed, extra_body_json, strict_finish_reason, strip_think_tags, timeout_seconds):
         normalized_endpoint = _normalize_endpoint(endpoint, timeout_seconds)
         messages = _build_chat_messages(system_prompt, user_prompt)
         return _chat_completion_request(
             normalized_endpoint,
             messages,
-            float(temperature),
             int(max_tokens),
-            float(top_p),
             int(seed),
             extra_body_json,
-            {"model", "messages", "temperature", "max_tokens", "top_p", "seed"},
+            {"model", "messages", "max_tokens", "seed"},
             bool(strip_think_tags),
+            bool(strict_finish_reason),
         )
 
 
@@ -912,11 +930,10 @@ class VisionChatOnce:
                 "image": ("IMAGE",),
                 "system_prompt": ("STRING", {"default": "", "multiline": True}),
                 "user_prompt": ("STRING", {"default": "", "multiline": True}),
-                "image_detail": (["auto", "low", "high"], {"default": "auto"}),
-                "temperature": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 2.0, "step": 0.05}),
-                "max_tokens": ("INT", {"default": 512, "min": 0, "max": 65535, "step": 1}),
+                "max_tokens": ("INT", {"default": 10240, "min": 0, "max": 65535, "step": 1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
                 "extra_body_json": ("STRING", {"default": "", "multiline": True}),
+                "strict_finish_reason": ("BOOLEAN", {"default": True}),
                 "strip_think_tags": ("BOOLEAN", {"default": False}),
                 "timeout_seconds": ("FLOAT", {"default": 60.0, "min": 0.1, "max": 300.0, "step": 0.5}),
             }
@@ -927,22 +944,21 @@ class VisionChatOnce:
     FUNCTION = "chat"
     CATEGORY = "zaknak/llm"
 
-    def chat(self, endpoint, image, system_prompt, user_prompt, image_detail, temperature, max_tokens, seed, extra_body_json, strip_think_tags, timeout_seconds):
+    def chat(self, endpoint, image, system_prompt, user_prompt, max_tokens, seed, extra_body_json, strict_finish_reason, strip_think_tags, timeout_seconds):
         normalized_endpoint = _normalize_endpoint(endpoint, timeout_seconds)
         if image.shape[0] < 1:
             raise ValueError("image input is empty")
         image_data_url = _encode_image_to_data_url(image[0])
-        messages = _build_vision_messages(system_prompt, user_prompt, image_data_url, image_detail)
+        messages = _build_vision_messages(system_prompt, user_prompt, image_data_url)
         return _chat_completion_request(
             normalized_endpoint,
             messages,
-            float(temperature),
             int(max_tokens),
-            None,
             int(seed),
             extra_body_json,
-            {"model", "messages", "temperature", "max_tokens", "seed"},
+            {"model", "messages", "max_tokens", "seed"},
             bool(strip_think_tags),
+            bool(strict_finish_reason),
         )
 
 
@@ -950,6 +966,7 @@ NODE_CLASS_MAPPINGS = {
     "MosaicByMask": MosaicByMask,
     "CensorBarsByMask": CensorBarsByMask,
     "CompatibleEndpoint": CompatibleEndpoint,
+    "CompatibleModelListView": CompatibleModelListView,
     "CompatibleModelSelector": CompatibleModelSelector,
     "PromptPreset": PromptPreset,
     "ChatOnce": ChatOnce,
@@ -960,11 +977,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MosaicByMask": "Mosaic By Mask",
     "CensorBarsByMask": "Censor Bars By Mask",
     "CompatibleEndpoint": "Compatible Endpoint",
+    "CompatibleModelListView": "Compatible Model List View",
     "CompatibleModelSelector": "Compatible Model Selector",
     "PromptPreset": "Prompt Preset",
     "ChatOnce": "Chat Once",
     "VisionChatOnce": "Vision Chat Once",
 }
+
 
 
 

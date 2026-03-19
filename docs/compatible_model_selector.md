@@ -32,7 +32,7 @@
 
 ### 取得済み一覧から 2 件目を選ぶ例
 
-`Compatible Endpoint` の `models_json` を接続し、`model_index=1` を指定すると、一覧の 2 件目のモデル名を `model_name` として取得できます。
+`Compatible Endpoint` の `models_json` を接続し、`model_index=1` を指定すると、一覧の 2 件目のモデル名を `model_name` として取得できます。index 対応を確認したい場合は、同じ `models_json` を `Compatible Model List View` へ渡します。
 
 ### 一覧が取得できない接続先の例
 
@@ -42,4 +42,5 @@
 
 - ComfyUI 標準 UI の制約上、このノードは現時点で動的ドロップダウンではなく index 指定で選択します
 - 一覧順序は接続先サーバーの応答順に依存します
+- index 対応の確認は `Compatible Model List View` の役割とします
 - このノード単体では接続先情報を保持しません
