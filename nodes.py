@@ -8,10 +8,10 @@ import time
 import urllib.error
 import urllib.request
 import zlib
-from string import Formatter
 
 import torch
 import torch.nn.functional as F
+import tomli
 
 
 MASK_BATCH_MODES = ["match_image_batch", "merge_batch_to_one"]
@@ -19,12 +19,6 @@ CHAT_COMPLETION_PATH = "/chat/completions"
 MODELS_PATH = "/models"
 DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
 CUSTOM_TYPE_ENDPOINT = "COMPATIBLE_ENDPOINT"
-
-
-try:
-    import yaml  # type: ignore
-except ImportError:
-    yaml = None
 
 
 def _normalize_mask_shape(mask: torch.Tensor) -> torch.Tensor:
@@ -416,85 +410,135 @@ def _encode_image_to_data_url(image: torch.Tensor) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
-def _load_text_file(path: str):
+_PROMPT_VARIABLE_PATTERN = re.compile(r"\{\{\s*([^{}\s]+)\s*\}\}")
+
+
+def _normalize_newlines(value: str) -> str:
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _validate_preset_path(path: str) -> str:
     file_path = str(path or "").strip()
     if not file_path:
         raise ValueError("preset_path is required")
-    with open(file_path, "r", encoding="utf-8") as handle:
-        text = handle.read()
-
-    lowered = file_path.lower()
-    if lowered.endswith(".json"):
-        return json.loads(text)
-    if lowered.endswith((".yaml", ".yml")):
-        if yaml is None:
-            raise RuntimeError("YAML presets require PyYAML to be installed; use JSON or install PyYAML")
-        return yaml.safe_load(text)
-    raise ValueError("preset_path must end with .json, .yaml, or .yml")
+    if not file_path.lower().endswith(".toml"):
+        raise ValueError(f"unsupported extension: preset_path must end with .toml: {file_path}")
+    return file_path
 
 
-def _resolve_preset_definition(document, preset_id: str) -> dict:
+def _read_preset_bytes(path: str) -> bytes:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except FileNotFoundError as exc:
+        raise ValueError(f"file not found: {path}") from exc
+    except OSError as exc:
+        raise ValueError(f"file read failed: {path}: {exc}") from exc
+
+
+def _decode_utf8_text(raw_bytes: bytes, path: str) -> str:
+    try:
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"invalid utf-8: {path}: {exc}") from exc
+
+
+def _load_toml_document(path: str) -> dict:
+    file_path = _validate_preset_path(path)
+    raw_bytes = _read_preset_bytes(file_path)
+    text = _decode_utf8_text(raw_bytes, file_path)
+    try:
+        document = tomli.loads(text)
+    except tomli.TOMLDecodeError as exc:
+        raise ValueError(f"toml parse error: {file_path}: {exc}") from exc
+
+    if not isinstance(document, dict):
+        raise ValueError("invalid preset structure: root document must be a table")
+    return document
+
+
+def _validate_preset_document(document: dict) -> dict:
+    version = document.get("version")
+    if version != 1:
+        raise ValueError(f"unsupported version: expected version = 1, got: {version!r}")
+
+    presets = document.get("presets")
+    if not isinstance(presets, dict):
+        raise ValueError("invalid preset structure: presets must be a table")
+    return presets
+
+
+def _resolve_preset_definition(document: dict, preset_id: str) -> dict | None:
     target = str(preset_id or "").strip()
     if not target:
         raise ValueError("preset_id is required")
 
-    if isinstance(document, dict):
-        if target in document and isinstance(document[target], dict):
-            preset = dict(document[target])
-            preset.setdefault("id", target)
-            return preset
-        presets = document.get("presets")
-        if isinstance(presets, dict) and target in presets and isinstance(presets[target], dict):
-            preset = dict(presets[target])
-            preset.setdefault("id", target)
-            return preset
-        if isinstance(presets, list):
-            document = presets
-        else:
-            document = [document]
-
-    if isinstance(document, list):
-        for item in document:
-            if not isinstance(item, dict):
-                continue
-            if item.get("id") == target:
-                return dict(item)
-
-    raise ValueError(f"preset_id not found: {target}")
+    presets = _validate_preset_document(document)
+    preset = presets.get(target)
+    if preset is None:
+        return None
+    if not isinstance(preset, dict):
+        raise ValueError(f"invalid preset structure: presets.{target} must be a table")
+    if "system" not in preset and "user" not in preset:
+        raise ValueError(f"invalid preset structure: presets.{target} must contain system or user")
+    return dict(preset)
 
 
-def _validate_template_variables(template: str, variables: dict) -> None:
-    missing = []
-    for _, field_name, _, _ in Formatter().parse(template):
-        if field_name and field_name not in variables:
-            missing.append(field_name)
-    if missing:
-        unique_missing = sorted(set(missing))
-        raise ValueError(f"missing template variables: {', '.join(unique_missing)}")
-
-
-def _build_user_prompt(preset: dict, variables_json: str, fallback_user_prompt: str) -> str:
-    fallback = str(fallback_user_prompt or "")
-    explicit_user_prompt = preset.get("user_prompt")
-    if isinstance(explicit_user_prompt, str) and explicit_user_prompt:
-        return explicit_user_prompt
-
-    template = str(preset.get("user_template", "") or "")
-    if not template:
-        return fallback
-
+def _parse_variables_json(variables_json: str) -> dict[str, str]:
     variables_text = str(variables_json or "").strip()
-    variables = {}
-    if variables_text:
-        try:
-            variables = json.loads(variables_text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"variables_json must be valid JSON: {exc}") from exc
-        if not isinstance(variables, dict):
-            raise ValueError("variables_json must decode to an object")
+    if not variables_text:
+        return {}
 
-    _validate_template_variables(template, variables)
-    return template.format_map(variables)
+    try:
+        variables = json.loads(variables_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"variables_json must be valid JSON: {exc}") from exc
+    if not isinstance(variables, dict):
+        raise ValueError("variables_json must decode to an object")
+
+    normalized = {}
+    for key, value in variables.items():
+        normalized[str(key)] = _normalize_newlines(str(value))
+    return normalized
+
+
+def _expand_prompt_variables(text: str, variables: dict[str, str]) -> str:
+    normalized_text = _normalize_newlines(text)
+
+    def replace(match):
+        name = match.group(1)
+        return variables.get(name, match.group(0))
+
+    return _PROMPT_VARIABLE_PATTERN.sub(replace, normalized_text)
+
+
+def _build_prompt_outputs(
+    preset: dict | None,
+    preset_id: str,
+    variables_json: str,
+    fallback_user_prompt: str,
+) -> tuple[str, str]:
+    variables = _parse_variables_json(variables_json)
+    fallback = _normalize_newlines(str(fallback_user_prompt or ""))
+
+    if preset is None:
+        if fallback:
+            return "", _expand_prompt_variables(fallback, variables)
+        raise ValueError(f"preset id not found: {preset_id}")
+
+    raw_system = preset.get("system")
+    system_prompt = ""
+    if raw_system is not None:
+        system_prompt = _expand_prompt_variables(str(raw_system), variables)
+
+    raw_user = preset.get("user")
+    if raw_user is None:
+        if fallback:
+            return system_prompt, _expand_prompt_variables(fallback, variables)
+        raise ValueError(f"user prompt missing and fallback not available: {preset_id}")
+
+    user_prompt = _expand_prompt_variables(str(raw_user), variables)
+    return system_prompt, user_prompt
 
 
 def _build_chat_messages(system_prompt: str, user_prompt: str) -> list:
@@ -871,15 +915,14 @@ class PromptPreset:
     CATEGORY = "zaknak/llm"
 
     def load_preset(self, preset_path, preset_id, variables_json, fallback_user_prompt):
-        document = _load_text_file(preset_path)
+        document = _load_toml_document(preset_path)
         preset = _resolve_preset_definition(document, preset_id)
-        system_prompt = str(preset.get("system_prompt", "") or "")
-        user_prompt = _build_user_prompt(preset, variables_json, fallback_user_prompt)
-        preset_name = str(preset.get("label") or preset.get("name") or preset.get("id") or preset_id)
+        system_prompt, user_prompt = _build_prompt_outputs(preset, preset_id, variables_json, fallback_user_prompt)
+        preset_name = str((preset or {}).get("label") or preset_id)
         preset_meta = {
             key: value
-            for key, value in preset.items()
-            if key not in {"system_prompt", "user_template", "user_prompt"}
+            for key, value in (preset or {}).items()
+            if key not in {"system", "user"}
         }
         return (system_prompt, user_prompt, _json_dumps(preset_meta), preset_name)
 

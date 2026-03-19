@@ -24,7 +24,7 @@ git clone https://github.com/zaknak/ComfyUi_zaknak_nodes.git
 | Compatible Endpoint | OpenAI 互換 API サーバーへの接続設定、モデル一覧取得、既定モデルの決定を扱う | [docs/compatible_endpoint.md](docs/compatible_endpoint.md) | 実装済み |
 | Compatible Model List View | `Compatible Endpoint` の `models_json` を `index: model_name` の一覧文字列へ整形して表示確認しやすくする | [docs/compatible_model_list_view.md](docs/compatible_model_list_view.md) | 実装済み |
 | Compatible Model Selector | `Compatible Endpoint` の `models_json` から index 指定でモデル名を選び、`model_name` のみを出力する | [docs/compatible_model_selector.md](docs/compatible_model_selector.md) | 実装済み |
-| Prompt Preset | 外部 JSON ベース、または PyYAML 利用時の YAML ベースでプリセット定義を読み出し、再利用しやすい prompt 設定を提供する | [docs/prompt_preset.md](docs/prompt_preset.md) | 実装済み |
+| Prompt Preset | 外部 TOML ファイルから prompt プリセット定義を読み出し、再利用しやすい prompt 設定を提供する | [docs/prompt_preset.md](docs/prompt_preset.md) | 実装済み |
 | Chat Once | OpenAI 互換 API へ単発のテキストチャットを送信し、応答文字列とメタ情報を得る | [docs/chat_once.md](docs/chat_once.md) | 実装済み |
 | Vision Chat Once | ComfyUI の画像入力先頭 1 枚とテキストを OpenAI 互換 API へ送り、画像付き応答を得る | [docs/vision_chat_once.md](docs/vision_chat_once.md) | 実装済み |
 
@@ -38,7 +38,36 @@ git clone https://github.com/zaknak/ComfyUi_zaknak_nodes.git
 - Compatible LLM / VLM 系は追加依存なしの実装を優先し、HTTP 通信と画像 PNG 化は標準ライブラリで処理します
 - `Compatible Endpoint` はモデル一覧を `models_json` と `status_text` で返し、`model_name` が空かつ一覧取得成功時は先頭モデルを既定値として採用します
 - モデル一覧から別のモデルを選びたい場合は `Compatible Model List View` で index 対応を確認し、`Compatible Model Selector` で `model_name` を取り出します
-- `Prompt Preset` の YAML 読み込みは `PyYAML` が利用可能な環境でのみ有効です
+- `Prompt Preset` は `tomli` を使って `.toml` のみを読み込みます
+
+## Prompt Preset TOML 例
+
+```toml
+version = 1
+
+[presets.summary]
+label = "Summary"
+system = """
+You are a helpful assistant.
+Answer in Japanese.
+"""
+user = """
+以下を要約してください。
+
+{{input}}
+"""
+
+[presets.translate]
+label = "Translate"
+system = """
+You are a translation assistant.
+"""
+user = """
+Translate the following text into Japanese:
+
+{{input}}
+"""
+```
 
 ## License
 

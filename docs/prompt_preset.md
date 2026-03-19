@@ -2,18 +2,18 @@
 
 ## 機能概要
 
-`Prompt Preset` は、外部ファイルで管理された prompt プリセット定義を読み出し、ComfyUI ワークフローで再利用しやすい形に整えるためのノードです。固定文のコピペを減らし、用途ごとの prompt を差し替えやすくすることを目的とします。
+`Prompt Preset` は、外部 TOML ファイルで管理された prompt プリセット定義を読み出し、ComfyUI ワークフローで再利用しやすい形に整えるためのノードです。固定文のコピペを減らし、用途ごとの prompt を差し替えやすくすることを目的とします。
 
-現在の基準形式は JSON で、YAML は `PyYAML` が利用可能な環境でのみ任意対応です。YAML を使う場合も、解釈される論理構造は JSON と同じです。
+外部形式は TOML のみを正式対応とし、JSON / YAML は読み込みません。
 
 ## 入力
 
 | 名前 | 型 | 説明 |
 | --- | --- | --- |
-| `preset_path` | `STRING` | プリセット定義ファイルのパス。`.json`、または `PyYAML` 利用時の `.yaml` / `.yml` |
+| `preset_path` | `STRING` | プリセット定義ファイルのパス。`.toml` のみ対応 |
 | `preset_id` | `STRING` | ファイル内から選択するプリセット識別子 |
-| `variables_json` | `STRING` | `user_template` のテンプレート展開に使う変数を JSON 文字列で与える入力 |
-| `fallback_user_prompt` | `STRING` | `user_prompt` と `user_template` が無い場合に使う補助入力 |
+| `variables_json` | `STRING` | `{{name}}` 置換に使う変数を JSON object 文字列で与える入力 |
+| `fallback_user_prompt` | `STRING` | `preset_id` 不一致、または対象プリセットの `user` が無いときに使う補助入力 |
 
 ## 出力
 
@@ -22,221 +22,166 @@
 | `system_prompt` | `STRING` | system 用の prompt |
 | `user_prompt` | `STRING` | 展開済み user prompt |
 | `preset_meta_json` | `STRING` | prompt 本文以外のメタ情報を JSON 文字列で返したもの |
-| `preset_name` | `STRING` | 表示用のプリセット名。`label` → `name` → `id` → `preset_id` の順で採用 |
+| `preset_name` | `STRING` | 表示用のプリセット名。`label` があればそれを使い、無ければ `preset_id` を使う |
 
-## プリセットオブジェクトの項目
+## TOML スキーマ
 
-1 件のプリセット定義は JSON object で、主に以下のキーを扱います。
+- ルート `version = 1` は必須です
+- ルート `presets` テーブルは必須です
+- 各プリセットは `[presets.<id>]` 形式で定義します
+- `label` は任意です
+- `system` と `user` は少なくともどちらか一方が必要です
+- 未知のキーは許容しますが、このノードでは無視します
+- `system` / `user` は複数行文字列の利用を前提とします
 
-| キー | 必須 | 説明 |
-| --- | --- | --- |
-| `id` | 形式による | プリセット識別子。配列形式では実質必須 |
-| `label` | 任意 | UI 表示向けの名前 |
-| `name` | 任意 | `label` が無い場合の表示名候補 |
-| `description` | 任意 | 説明文 |
-| `system_prompt` | 任意 | system prompt |
-| `user_prompt` | 任意 | 固定の user prompt。非空文字列なら最優先 |
-| `user_template` | 任意 | `variables_json` で展開するテンプレート |
-| `tags` | 任意 | 任意のタグ配列など |
-| `version` | 任意 | 任意のバージョン情報 |
-| `variables` | 任意 | メタ情報としては保持可能。ただし現在の実装ではテンプレート展開には未使用 |
+```toml
+version = 1
 
-`preset_meta_json` には、`system_prompt`、`user_template`、`user_prompt` を除いた残りのキーが入ります。
+[presets.summary]
+label = "Summary"
+system = """
+You are a helpful assistant.
+Answer in Japanese.
+"""
+user = """
+以下を要約してください。
 
-## 想定している JSON フォーマット
+{{input}}
+"""
 
-実装は、トップレベルとして以下の形を解釈します。
+[presets.translate]
+label = "Translate"
+system = """
+You are a translation assistant.
+"""
+user = """
+Translate the following text into Japanese:
 
-### 1. 単一プリセット object
-
-```json
-{
-  "id": "tag_extract",
-  "label": "タグ抽出",
-  "system_prompt": "あなたはタグ抽出アシスタントです。",
-  "user_template": "次の文章からタグを列挙してください: {text}",
-  "tags": ["tag", "text"],
-  "version": "1.0"
-}
-```
-
-この場合、`preset_id` は `tag_extract` を指定します。
-
-### 2. `preset_id` をキーにした辞書
-
-```json
-{
-  "tag_extract": {
-    "label": "タグ抽出",
-    "system_prompt": "あなたはタグ抽出アシスタントです。",
-    "user_template": "次の文章からタグを列挙してください: {text}"
-  },
-  "summary": {
-    "label": "要約",
-    "system_prompt": "あなたは要約アシスタントです。",
-    "user_template": "次の文章を{tone}に要約してください: {text}"
-  }
-}
-```
-
-この形式では、各値の object に `id` が無くても、辞書キーが `id` として補われます。
-
-### 3. `presets` 配下に辞書を持つ object
-
-```json
-{
-  "presets": {
-    "tag_extract": {
-      "label": "タグ抽出",
-      "description": "文章からタグ候補を作る",
-      "system_prompt": "あなたはタグ抽出アシスタントです。",
-      "user_template": "次の文章からタグを列挙してください: {text}"
-    },
-    "summary": {
-      "label": "要約",
-      "system_prompt": "あなたは要約アシスタントです。",
-      "user_template": "次の文章を{tone}に要約してください: {text}"
-    }
-  }
-}
-```
-
-この形式でも、`presets` 配下のキー名が `preset_id` として使われます。
-
-### 4. `presets` 配下に配列を持つ object
-
-```json
-{
-  "presets": [
-    {
-      "id": "tag_extract",
-      "label": "タグ抽出",
-      "system_prompt": "あなたはタグ抽出アシスタントです。",
-      "user_template": "次の文章からタグを列挙してください: {text}"
-    },
-    {
-      "id": "summary",
-      "label": "要約",
-      "system_prompt": "あなたは要約アシスタントです。",
-      "user_template": "次の文章を{tone}に要約してください: {text}"
-    }
-  ]
-}
-```
-
-この形式では、各要素に `id` が必要です。
-
-### 5. `id` を持つ object の配列
-
-```json
-[
-  {
-    "id": "tag_extract",
-    "label": "タグ抽出",
-    "system_prompt": "あなたはタグ抽出アシスタントです。",
-    "user_template": "次の文章からタグを列挙してください: {text}"
-  },
-  {
-    "id": "summary",
-    "label": "要約",
-    "system_prompt": "あなたは要約アシスタントです。",
-    "user_template": "次の文章を{tone}に要約してください: {text}"
-  }
-]
+{{input}}
+"""
 ```
 
 ## 処理仕様
 
-- ノードは外部ファイルを読み、`preset_id` に対応する定義を解決します
-- `user_prompt` が非空文字列であれば、それを最優先で返します
-- `user_prompt` が無く、`user_template` がある場合は `variables_json` を JSON object として読み、`str.format_map` で展開します
-- `user_prompt` と `user_template` がどちらも無い場合は `fallback_user_prompt` を返します
-- `variables_json` が空文字なら空 object `{}` として扱います
-- `preset_meta_json` には prompt 本文以外のメタ情報を含めます
+- ノードは UTF-8 の `.toml` ファイルだけを読み込みます
+- 改行コードは LF / CRLF のどちらでも受理し、内部では LF (`\n`) に正規化します
+- `system` と `user` は読み込み後に LF へ正規化します
+- `variables_json` 内の文字列値も LF へ正規化してから置換します
+- 最終出力の `system_prompt` / `user_prompt` も LF に統一します
+- 末尾改行や中間改行は、不要に削除・圧縮せず、記述内容をできるだけ保持します
 
-優先順位は次のとおりです。
+## 変数展開
 
-1. `user_prompt`
-2. `user_template` + `variables_json`
-3. `fallback_user_prompt`
+- 記法は `{{name}}` です
+- 展開対象は `system` と `user` の両方です
+- 展開は単純文字列置換のみです
+- 式評価、関数呼び出し、ネスト構文、テンプレート言語化は行いません
+- 未定義変数はエラーにせず、そのまま残します
+- `variables_json` は空文字または JSON object である必要があります
 
-## 使用例
+例:
 
-### 辞書マップ形式の例
+```toml
+version = 1
 
-ファイル `prompt_presets.json`:
+[presets.example]
+label = "Example"
+system = """
+You are a helpful assistant.
+"""
+user = """
+Summarize the following text:
+{{input}}
+"""
+```
+
+`variables_json`:
 
 ```json
 {
-  "tag_extract": {
-    "label": "タグ抽出",
-    "system_prompt": "あなたはタグ抽出アシスタントです。",
-    "user_template": "次の文章からタグを列挙してください: {text}"
-  }
+  "input": "黒猫が窓辺で眠っている"
 }
+```
+
+生成される `user_prompt`:
+
+```text
+Summarize the following text:
+黒猫が窓辺で眠っている
+```
+
+## fallback の扱い
+
+### fallback を使わず明示的エラーにするケース
+
+- file not found
+- file read failed
+- unsupported extension
+- invalid utf-8
+- toml parse error
+- unsupported version
+- invalid preset structure
+
+### fallback を許容するケース
+
+- `preset_id` 不一致
+- 対象プリセットの `user` 欠落
+
+`preset_id` が見つからない場合、`fallback_user_prompt` が非空ならそれを `user_prompt` として返します。対象プリセットに `user` が無い場合も同様です。`fallback_user_prompt` が空なら明示的に失敗します。
+
+## 使用例
+
+ファイル `prompt_presets.toml`:
+
+```toml
+version = 1
+
+[presets.summary]
+label = "Summary"
+system = """
+You are a helpful assistant.
+Answer in Japanese.
+"""
+user = """
+以下を要約してください。
+
+{{input}}
+"""
+
+[presets.translate]
+label = "Translate"
+system = """
+You are a translation assistant.
+"""
+user = """
+Translate the following text into Japanese:
+
+{{input}}
+"""
 ```
 
 ノード入力:
 
-```json
-preset_id = "tag_extract"
-variables_json = {"text":"黒猫が窓辺で眠っている"}
+```text
+preset_id = "summary"
+variables_json = {"input":"黒猫が窓辺で眠っている"}
 ```
 
 生成される `user_prompt`:
 
 ```text
-次の文章からタグを列挙してください: 黒猫が窓辺で眠っている
-```
+以下を要約してください。
 
-### 固定 `user_prompt` を使う例
-
-```json
-{
-  "summary_fixed": {
-    "label": "固定要約",
-    "system_prompt": "あなたは要約アシスタントです。",
-    "user_prompt": "以下の文章を3行で要約してください。"
-  }
-}
-```
-
-この場合、`variables_json` の内容に関係なく `user_prompt` がそのまま返ります。
-
-### 複数変数を使う例
-
-```json
-{
-  "summary": {
-    "label": "要約",
-    "system_prompt": "あなたは要約アシスタントです。",
-    "user_template": "次の文章を{tone}に要約してください: {text}"
-  }
-}
-```
-
-```json
-{
-  "tone": "簡潔",
-  "text": "この文章は長い説明文です。"
-}
-```
-
-生成される `user_prompt`:
-
-```text
-次の文章を簡潔に要約してください: この文章は長い説明文です。
+黒猫が窓辺で眠っている
 ```
 
 ## 注意点 / 制約
 
-- 初期仕様ではプリセットの永続保存 UI は扱わず、外部ファイル読み出しを前提とします
-- YAML 読み込みは `PyYAML` が使える環境でのみ有効です
-- `preset_path` は `.json`、`.yaml`、`.yml` のみを受け付けます
-- `preset_id` は必須です
-- 対象の `preset_id` が見つからない場合はエラーになります
-- `variables_json` は空文字または JSON object である必要があります
+- `preset_path` は `.toml` のみを受け付けます
+- `version` は `1` 固定です
+- `presets` はテーブルである必要があります
+- 対象プリセットはテーブルである必要があります
+- `system` / `user` の少なくとも一方が必要です
 - `variables_json` が不正 JSON、または object 以外の JSON 値だった場合はエラーになります
-- `user_template` の必須変数が `variables_json` に不足している場合はエラーになります
-- プリセット定義内の `variables` は、現在の実装ではテンプレート展開に使われません
-- ワークフロー再現性の観点では、プリセットファイルのパス管理をどうするか別途検討が必要です
+- `Prompt Preset` は `tomli` を使用して TOML を読み込みます
+- JSON / YAML 互換維持、自動移行、TOML 書き戻し、messages 形式対応は扱いません

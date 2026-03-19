@@ -22,7 +22,7 @@
 - [Compatible Endpoint](compatible_endpoint.md): 接続先設定、モデル一覧取得、既定モデルの決定を扱う
 - [Compatible Model List View](compatible_model_list_view.md): `models_json` を `index: model_name` の一覧文字列へ整形して確認しやすくする
 - [Compatible Model Selector](compatible_model_selector.md): `models_json` から index 指定で `model_name` を選ぶ
-- [Prompt Preset](prompt_preset.md): 外部 JSON ベース、または PyYAML 利用時の YAML ベースで prompt プリセットを扱う
+- [Prompt Preset](prompt_preset.md): 外部 TOML ファイルの prompt プリセットを扱う
 - [Chat Once](chat_once.md): 単発のテキストチャット送信を扱う
 - [Vision Chat Once](vision_chat_once.md): 画像付きの単発チャット送信を扱う
 - [Chat History Future](chat_history_future.md): 履歴付きチャットの将来拡張方針を整理する設計メモ
