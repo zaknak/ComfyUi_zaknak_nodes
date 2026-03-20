@@ -4,7 +4,7 @@
 
 `Prompt Preset` は、外部 TOML ファイルで管理された prompt プリセット定義を読み出し、ComfyUI ワークフローで再利用しやすい形に整えるためのノードです。固定文のコピペを減らし、用途ごとの prompt を差し替えやすくすることを目的とします。
 
-外部形式は TOML のみを正式対応とし、JSON / YAML は読み込みません。
+外部形式は TOML のみを正式対応とし、JSON / YAML は読み込みません。追加変数入力も `variables_toml` に統一し、プリセット本体と同じ TOML 文化で扱います。
 
 ## 入力
 
@@ -12,8 +12,10 @@
 | --- | --- | --- |
 | `preset_path` | `STRING` | プリセット定義ファイルのパス。`.toml` のみ対応 |
 | `preset_id` | `STRING` | ファイル内から選択するプリセット識別子 |
-| `variables_json` | `STRING` | `{{name}}` 置換に使う変数を JSON object 文字列で与える入力 |
+| `input_text` | `STRING` | 複数行本文入力。自動的に `input` 変数として扱う |
+| `variables_toml` | `STRING` | 追加変数を与えるフラットな TOML key-value 文字列 |
 | `fallback_user_prompt` | `STRING` | `preset_id` 不一致、または対象プリセットの `user` が無いときに使う補助入力 |
+| `keep_unresolved_variables` | `BOOLEAN` | 未解決変数を出力に残すかどうか。`true` ならそのまま残し、`false` なら空文字に置換する |
 
 ## 出力
 
@@ -21,7 +23,7 @@
 | --- | --- | --- |
 | `system_prompt` | `STRING` | system 用の prompt |
 | `user_prompt` | `STRING` | 展開済み user prompt |
-| `preset_meta_json` | `STRING` | prompt 本文以外のメタ情報を JSON 文字列で返したもの |
+| `preset_meta_json` | `STRING` | prompt 本文以外のメタ情報を JSON 文字列で返したもの。`_prompt_preset` に変数解決の要約を含む |
 | `preset_name` | `STRING` | 表示用のプリセット名。`label` があればそれを使い、無ければ `preset_id` を使う |
 
 ## TOML スキーマ
@@ -42,73 +44,175 @@ label = "Summary"
 system = """
 You are a helpful assistant.
 Answer in Japanese.
+Style: {{style}}
+Instruction:
+{{instruction}}
 """
 user = """
 以下を要約してください。
 
 {{input}}
 """
+```
 
-[presets.translate]
-label = "Translate"
-system = """
-You are a translation assistant.
-"""
-user = """
-Translate the following text into Japanese:
+## 変数入力仕様
 
-{{input}}
+### 入力方式
+
+- `input_text` は `input` 変数に対応します
+- `variables_toml` は任意の追加変数を TOML で与えます
+- `system` と `user` の両方に同じ変数辞書を使って展開します
+- `keep_unresolved_variables` の既定値は `true` です
+
+### 変数辞書の構築順
+
+1. 空の変数辞書を作る
+2. `variables_toml` を parse して追加する
+3. `input_text` が非空なら LF 正規化し、`input` として追加する
+
+同名キーが競合した場合は個別入力欄を優先します。つまり、`variables_toml` に `input = "..."` があっても、`input_text` の値が `input` として使われます。`input_text` が空なら `input` キーは作りません。
+
+### `variables_toml` の制約
+
+- ルートはフラットな TOML key-value 群のみ受け付けます
+- string / int / float / bool を許可します
+- TOML の複数行文字列も string として許可します
+- array はエラーです
+- table / inline table / array of tables はエラーです
+- その他ネスト構造はエラーです
+- 構文エラーは明示的エラーにします
+
+有効例:
+
+```toml
+style = "concise"
+target_language = "Japanese"
+temperature = 0.7
+use_markdown = true
+instruction = """
+Please keep the tone formal.
+Use short paragraphs.
 """
+```
+
+無効例:
+
+```toml
+tags = ["a", "b"]
+```
+
+```toml
+[style]
+name = "concise"
+```
+
+```toml
+meta = { a = 1 }
 ```
 
 ## 処理仕様
 
 - ノードは UTF-8 の `.toml` ファイルだけを読み込みます
 - 改行コードは LF / CRLF のどちらでも受理し、内部では LF (`\n`) に正規化します
-- `system` と `user` は読み込み後に LF へ正規化します
-- `variables_json` 内の文字列値も LF へ正規化してから置換します
-- 最終出力の `system_prompt` / `user_prompt` も LF に統一します
-- 末尾改行や中間改行は、不要に削除・圧縮せず、記述内容をできるだけ保持します
+- `input_text`、`variables_toml` 内の文字列値、TOML の `system` / `user`、最終出力はすべて LF に正規化します
+- 中間改行は保持し、不要な空白圧縮や整形は行いません
+- `{{name}}` は単純文字列置換のみで展開します
+- 未解決変数はエラーにせず、コンソールへ出力します
+- `keep_unresolved_variables=true` なら未解決変数はそのまま残します
+- `keep_unresolved_variables=false` なら未解決変数は空文字へ置換します
+- ネスト参照、フィルタ、条件分岐、ループ、関数呼び出し、式評価は行いません
 
-## 変数展開
+## 使用例
 
-- 記法は `{{name}}` です
-- 展開対象は `system` と `user` の両方です
-- 展開は単純文字列置換のみです
-- 式評価、関数呼び出し、ネスト構文、テンプレート言語化は行いません
-- 未定義変数はエラーにせず、そのまま残します
-- `variables_json` は空文字または JSON object である必要があります
-
-例:
+### プリセット TOML
 
 ```toml
 version = 1
 
-[presets.example]
-label = "Example"
+[presets.summary]
+label = "Summary"
 system = """
 You are a helpful assistant.
+Answer in Japanese.
+Style: {{style}}
+Instruction:
+{{instruction}}
 """
 user = """
-Summarize the following text:
+以下を要約してください。
+
 {{input}}
 """
 ```
 
-`variables_json`:
+### UI 入力
 
-```json
-{
-  "input": "黒猫が窓辺で眠っている"
-}
-```
-
-生成される `user_prompt`:
+`input_text`:
 
 ```text
-Summarize the following text:
-黒猫が窓辺で眠っている
+ここに要約対象の本文
 ```
+
+`variables_toml`:
+
+```toml
+style = "concise"
+instruction = """
+Use short paragraphs.
+Avoid bullet points unless necessary.
+"""
+```
+
+### 展開結果
+
+`system_prompt`:
+
+```text
+You are a helpful assistant.
+Answer in Japanese.
+Style: concise
+Instruction:
+Use short paragraphs.
+Avoid bullet points unless necessary.
+```
+
+`user_prompt`:
+
+```text
+以下を要約してください。
+
+ここに要約対象の本文
+```
+
+### 未定義変数の扱い
+
+テンプレート:
+
+```text
+Hello {{name}}
+{{unknown_value}}
+```
+
+変数:
+
+```toml
+name = "Kentaroh"
+```
+
+結果:
+
+```text
+Hello Kentaroh
+{{unknown_value}}
+```
+
+`keep_unresolved_variables=false` の場合:
+
+```text
+Hello Kentaroh
+```
+
+未解決変数が存在した場合は、`system` / `user` / fallback のどこで発生したか分かる形でコンソールへ変数名一覧を出力します。
 
 ## fallback の扱い
 
@@ -121,6 +225,10 @@ Summarize the following text:
 - toml parse error
 - unsupported version
 - invalid preset structure
+- `variables_toml` が TOML として parse できない
+- `variables_toml` に array が含まれる
+- `variables_toml` に table / inline table / array of tables が含まれる
+- `variables_toml` にその他ネスト構造が含まれる
 
 ### fallback を許容するケース
 
@@ -129,51 +237,19 @@ Summarize the following text:
 
 `preset_id` が見つからない場合、`fallback_user_prompt` が非空ならそれを `user_prompt` として返します。対象プリセットに `user` が無い場合も同様です。`fallback_user_prompt` が空なら明示的に失敗します。
 
-## 使用例
+## `preset_meta_json` の補足
 
-ファイル `prompt_presets.toml`:
+`preset_meta_json` には、プリセット内のメタ情報に加えて `_prompt_preset` を含めます。ここには少なくとも以下が入ります。
 
-```toml
-version = 1
-
-[presets.summary]
-label = "Summary"
-system = """
-You are a helpful assistant.
-Answer in Japanese.
-"""
-user = """
-以下を要約してください。
-
-{{input}}
-"""
-
-[presets.translate]
-label = "Translate"
-system = """
-You are a translation assistant.
-"""
-user = """
-Translate the following text into Japanese:
-
-{{input}}
-"""
-```
-
-ノード入力:
-
-```text
-preset_id = "summary"
-variables_json = {"input":"黒猫が窓辺で眠っている"}
-```
-
-生成される `user_prompt`:
-
-```text
-以下を要約してください。
-
-黒猫が窓辺で眠っている
-```
+- `preset_id`
+- `resolved_variable_names`
+- `input_text_used`
+- `fallback_used`
+- `keep_unresolved_variables`
+- `unresolved_variable_names`
+- `unresolved_in_system`
+- `unresolved_in_user`
+- `unresolved_in_fallback`
 
 ## 注意点 / 制約
 
@@ -182,6 +258,8 @@ variables_json = {"input":"黒猫が窓辺で眠っている"}
 - `presets` はテーブルである必要があります
 - 対象プリセットはテーブルである必要があります
 - `system` / `user` の少なくとも一方が必要です
-- `variables_json` が不正 JSON、または object 以外の JSON 値だった場合はエラーになります
+- `variables_toml` は空文字を許容します
+- `input_text` は空でも許容します
 - `Prompt Preset` は `tomli` を使用して TOML を読み込みます
-- JSON / YAML 互換維持、自動移行、TOML 書き戻し、messages 形式対応は扱いません
+- 未解決変数はエラーにしませんが、コンソールには出力されます
+- 旧 JSON 追加変数互換、可変 GUI フィールド生成、Jinja 風テンプレート機能は扱いません

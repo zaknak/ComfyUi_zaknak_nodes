@@ -90,8 +90,12 @@ VLM 向けの画像付き送信は、テキスト専用ノードと分離しま�
 - プリセットは外部 `.toml` ファイルのみを読み込みます
 - ルートには `version = 1` と `presets` テーブルが必須です
 - 各プリセットは `[presets.<id>]` 形式で定義します
+- 変数入力は `input_text` と `variables_toml` の 2 系統で受けます
+- `input_text` は `input` 変数として扱い、同名競合時は `variables_toml` より優先します
 - `system` と `user` は少なくともどちらか一方を持てます
-- `system` / `user` の変数展開は `{{name}}` の単純文字列置換で行い、未定義変数はそのまま残します
+- `system` / `user` の変数展開は `{{name}}` の単純文字列置換で行います
+- 未解決変数はコンソールへ出力し、`keep_unresolved_variables` でそのまま残すか空文字にするかを切り替えます
+- `variables_toml` はフラットな TOML key-value のみを受け付け、array / table / inline table はエラーにします
 - 改行は内部で LF に正規化し、不要なトリムや圧縮は行いません
 - `preset_id` 不一致と `user` 欠落時だけ `fallback_user_prompt` を使えます
 - 送信ノードはプリセット内部構造へ強く依存せず、読み出し済みの prompt 情報を受け取って利用します
@@ -109,7 +113,9 @@ VLM 向けの画像付き送信は、テキスト専用ノードと分離しま�
 - 空応答または不正 JSON
 - API キー不足
 - プリセットファイル読込失敗
-- テンプレート変数不足
+- `variables_toml` の TOML 構文エラー
+- `variables_toml` の配列型不正
+- `variables_toml` の table / inline table 型不正
 - `extra_body_json` の不正 JSON
 - `extra_body_json` の型不正
 - `extra_body_json` と既存 payload のキー衝突
