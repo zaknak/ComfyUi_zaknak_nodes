@@ -38,7 +38,10 @@ git clone https://github.com/zaknak/ComfyUi_zaknak_nodes.git
 - Compatible LLM / VLM 系は追加依存なしの実装を優先し、HTTP 通信と画像 PNG 化は標準ライブラリで処理します
 - `Compatible Endpoint` はモデル一覧を `models_json` と `status_text` で返し、`model_name` が空かつ一覧取得成功時は先頭モデルを既定値として採用します
 - モデル一覧から別のモデルを選びたい場合は `Compatible Model List View` で index 対応を確認し、`Compatible Model Selector` で `model_name` を取り出します
-- `Prompt Preset` は `tomli` を使って `.toml` のみを読み込みます
+- `Prompt Preset` は `tomli` を使って `.toml` のみを読み込み、`input_text` を `input` 変数として扱います
+- `Prompt Preset` の追加変数は `variables_toml` で与え、同名なら個別欄の `input_text` が優先されます
+- `variables_toml` はフラットな TOML key-value のみを受け付け、array / table / inline table は扱いません
+- `Prompt Preset` は未解決変数をコンソールへ出力し、`keep_unresolved_variables` で出力へ残すか空文字にするかを切り替えられます
 
 ## Prompt Preset TOML 例
 
@@ -50,22 +53,28 @@ label = "Summary"
 system = """
 You are a helpful assistant.
 Answer in Japanese.
+Style: {{style}}
+Instruction:
+{{instruction}}
 """
 user = """
 以下を要約してください。
 
 {{input}}
 """
+```
 
-[presets.translate]
-label = "Translate"
-system = """
-You are a translation assistant.
-"""
-user = """
-Translate the following text into Japanese:
+UI 入力例:
 
-{{input}}
+```text
+input_text = 要約対象の本文
+```
+
+```toml
+style = "concise"
+instruction = """
+Use short paragraphs.
+Avoid bullet points unless necessary.
 """
 ```
 

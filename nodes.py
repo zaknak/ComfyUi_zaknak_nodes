@@ -484,61 +484,155 @@ def _resolve_preset_definition(document: dict, preset_id: str) -> dict | None:
     return dict(preset)
 
 
-def _parse_variables_json(variables_json: str) -> dict[str, str]:
-    variables_text = str(variables_json or "").strip()
-    if not variables_text:
+def _stringify_variable_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return _normalize_newlines(str(value))
+
+
+def _parse_variables_toml(variables_toml: str) -> dict[str, str]:
+    text = str(variables_toml or "").strip()
+    if not text:
         return {}
 
     try:
-        variables = json.loads(variables_text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"variables_json must be valid JSON: {exc}") from exc
+        variables = tomli.loads(text)
+    except tomli.TOMLDecodeError as exc:
+        raise ValueError(f"variables_toml parse error: {exc}") from exc
     if not isinstance(variables, dict):
-        raise ValueError("variables_json must decode to an object")
+        raise ValueError("variables_toml must decode to a flat key-value table")
 
     normalized = {}
     for key, value in variables.items():
-        normalized[str(key)] = _normalize_newlines(str(value))
+        if isinstance(value, list):
+            raise ValueError(f"variables_toml contains unsupported value type for key '{key}': array")
+        if isinstance(value, dict):
+            raise ValueError(f"variables_toml contains unsupported value type for key '{key}': table")
+        if not isinstance(value, (str, int, float, bool)):
+            raise ValueError(f"variables_toml contains unsupported value type for key '{key}': {type(value).__name__}")
+        normalized[str(key)] = _stringify_variable_value(value)
     return normalized
 
 
-def _expand_prompt_variables(text: str, variables: dict[str, str]) -> str:
+def _build_template_variables(input_text: str, variables_toml: str) -> dict[str, str]:
+    variables = _parse_variables_toml(variables_toml)
+    normalized_input_text = _normalize_newlines(input_text)
+    if normalized_input_text:
+        variables["input"] = normalized_input_text
+    return variables
+
+
+def _log_unresolved_template_variables(preset_id: str, field_name: str, unresolved_names: list[str]) -> None:
+    if not unresolved_names:
+        return
+    unresolved_text = ", ".join(sorted(set(unresolved_names)))
+    print(f"[PromptPreset] unresolved variables in preset '{preset_id}' ({field_name}): {unresolved_text}")
+
+
+def _render_template(
+    text: str,
+    variables: dict[str, str],
+    keep_unresolved_variables: bool,
+    preset_id: str,
+    field_name: str,
+) -> tuple[str, list[str]]:
     normalized_text = _normalize_newlines(text)
+    unresolved_names = []
 
     def replace(match):
         name = match.group(1)
-        return variables.get(name, match.group(0))
+        if name in variables:
+            return variables[name]
+        unresolved_names.append(name)
+        if keep_unresolved_variables:
+            return match.group(0)
+        return ""
 
-    return _PROMPT_VARIABLE_PATTERN.sub(replace, normalized_text)
+    rendered = _PROMPT_VARIABLE_PATTERN.sub(replace, normalized_text)
+    resolved_unresolved_names = sorted(set(unresolved_names))
+    _log_unresolved_template_variables(preset_id, field_name, resolved_unresolved_names)
+    return rendered, resolved_unresolved_names
 
 
 def _build_prompt_outputs(
     preset: dict | None,
     preset_id: str,
-    variables_json: str,
+    input_text: str,
+    variables_toml: str,
     fallback_user_prompt: str,
-) -> tuple[str, str]:
-    variables = _parse_variables_json(variables_json)
+    keep_unresolved_variables: bool,
+) -> tuple[str, str, dict[str, object]]:
+    variables = _build_template_variables(input_text, variables_toml)
     fallback = _normalize_newlines(str(fallback_user_prompt or ""))
+    prompt_meta = {
+        "preset_id": str(preset_id),
+        "resolved_variable_names": sorted(variables.keys()),
+        "input_text_used": bool(input_text),
+        "fallback_used": False,
+        "keep_unresolved_variables": bool(keep_unresolved_variables),
+        "unresolved_variable_names": [],
+        "unresolved_in_system": [],
+        "unresolved_in_user": [],
+        "unresolved_in_fallback": [],
+    }
 
     if preset is None:
         if fallback:
-            return "", _expand_prompt_variables(fallback, variables)
+            prompt_meta["fallback_used"] = True
+            rendered_fallback, unresolved_fallback = _render_template(
+                fallback,
+                variables,
+                keep_unresolved_variables,
+                str(preset_id),
+                "fallback_user_prompt",
+            )
+            prompt_meta["unresolved_in_fallback"] = unresolved_fallback
+            prompt_meta["unresolved_variable_names"] = sorted(set(unresolved_fallback))
+            return "", rendered_fallback, prompt_meta
         raise ValueError(f"preset id not found: {preset_id}")
 
     raw_system = preset.get("system")
     system_prompt = ""
     if raw_system is not None:
-        system_prompt = _expand_prompt_variables(str(raw_system), variables)
+        system_prompt, unresolved_system = _render_template(
+            str(raw_system),
+            variables,
+            keep_unresolved_variables,
+            str(preset_id),
+            "system",
+        )
+        prompt_meta["unresolved_in_system"] = unresolved_system
 
     raw_user = preset.get("user")
     if raw_user is None:
         if fallback:
-            return system_prompt, _expand_prompt_variables(fallback, variables)
+            prompt_meta["fallback_used"] = True
+            rendered_fallback, unresolved_fallback = _render_template(
+                fallback,
+                variables,
+                keep_unresolved_variables,
+                str(preset_id),
+                "fallback_user_prompt",
+            )
+            prompt_meta["unresolved_in_fallback"] = unresolved_fallback
+            prompt_meta["unresolved_variable_names"] = sorted(
+                set(prompt_meta["unresolved_in_system"]) | set(unresolved_fallback)
+            )
+            return system_prompt, rendered_fallback, prompt_meta
         raise ValueError(f"user prompt missing and fallback not available: {preset_id}")
 
-    user_prompt = _expand_prompt_variables(str(raw_user), variables)
-    return system_prompt, user_prompt
+    user_prompt, unresolved_user = _render_template(
+        str(raw_user),
+        variables,
+        keep_unresolved_variables,
+        str(preset_id),
+        "user",
+    )
+    prompt_meta["unresolved_in_user"] = unresolved_user
+    prompt_meta["unresolved_variable_names"] = sorted(
+        set(prompt_meta["unresolved_in_system"]) | set(unresolved_user)
+    )
+    return system_prompt, user_prompt, prompt_meta
 
 
 def _build_chat_messages(system_prompt: str, user_prompt: str) -> list:
@@ -904,8 +998,10 @@ class PromptPreset:
             "required": {
                 "preset_path": ("STRING", {"default": ""}),
                 "preset_id": ("STRING", {"default": ""}),
-                "variables_json": ("STRING", {"default": "{}", "multiline": True}),
+                "input_text": ("STRING", {"default": "", "multiline": True}),
+                "variables_toml": ("STRING", {"default": "", "multiline": True}),
                 "fallback_user_prompt": ("STRING", {"default": "", "multiline": True}),
+                "keep_unresolved_variables": ("BOOLEAN", {"default": True}),
             }
         }
 
@@ -914,16 +1010,24 @@ class PromptPreset:
     FUNCTION = "load_preset"
     CATEGORY = "zaknak/llm"
 
-    def load_preset(self, preset_path, preset_id, variables_json, fallback_user_prompt):
+    def load_preset(self, preset_path, preset_id, input_text, variables_toml, fallback_user_prompt, keep_unresolved_variables):
         document = _load_toml_document(preset_path)
         preset = _resolve_preset_definition(document, preset_id)
-        system_prompt, user_prompt = _build_prompt_outputs(preset, preset_id, variables_json, fallback_user_prompt)
+        system_prompt, user_prompt, prompt_meta = _build_prompt_outputs(
+            preset,
+            preset_id,
+            input_text,
+            variables_toml,
+            fallback_user_prompt,
+            bool(keep_unresolved_variables),
+        )
         preset_name = str((preset or {}).get("label") or preset_id)
         preset_meta = {
             key: value
             for key, value in (preset or {}).items()
             if key not in {"system", "user"}
         }
+        preset_meta["_prompt_preset"] = prompt_meta
         return (system_prompt, user_prompt, _json_dumps(preset_meta), preset_name)
 
 
