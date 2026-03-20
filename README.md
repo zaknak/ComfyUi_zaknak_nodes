@@ -42,6 +42,7 @@ git clone https://github.com/zaknak/ComfyUi_zaknak_nodes.git
 - `Prompt Preset` の追加変数は `variables_toml` で与え、同名なら個別欄の `input_text` が優先されます
 - `variables_toml` はフラットな TOML key-value のみを受け付け、array / table / inline table は扱いません
 - `Prompt Preset` は未解決変数をコンソールへ出力し、`keep_unresolved_variables` で出力へ残すか空文字にするかを切り替えられます
+- `Chat Once` / `Vision Chat Once` の追加 body パラメータは `extra_body_toml` で与え、`Prompt Preset` と同じく TOML ベースで統一します
 
 ## Prompt Preset TOML 例
 

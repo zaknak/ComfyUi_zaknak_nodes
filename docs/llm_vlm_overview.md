@@ -49,11 +49,11 @@ prompt プリセットは送信ノードへ内蔵せず、外部 TOML ファイ�
 
 ### 単発送信ノード
 
-単発のテキストチャットは独立した 1 回のリクエストとして扱います。履歴状態を持たせず、ComfyUI のワークフロー内で明快に使えることを優先します。ノード入力としては `max_tokens` と `seed` を扱い、`max_tokens` の既定値は `10240` とします。`temperature` や `top_p` のような追加 generation パラメータは `extra_body_json` で任意に指定できます。さらに `strict_finish_reason` により、`finish_reason` が `stop` 以外だった応答をエラーとして扱えるようにします。`text` 出力には任意の後処理オプションを持てるものとし、`strip_think_tags` は `<think>` 推論ログを除去する整形機能として扱います。
+単発のテキストチャットは独立した 1 回のリクエストとして扱います。履歴状態を持たせず、ComfyUI のワークフロー内で明快に使えることを優先します。ノード入力としては `max_tokens` と `seed` を扱い、`max_tokens` の既定値は `10240` とします。`temperature` や `top_p` のような追加 generation パラメータは `extra_body_toml` で任意に指定できます。さらに `strict_finish_reason` により、`finish_reason` が `stop` 以外だった応答をエラーとして扱えるようにします。`text` 出力には任意の後処理オプションを持てるものとし、`strip_think_tags` は `<think>` 推論ログを除去する整形機能として扱います。
 
 ### 画像付き送信ノード
 
-VLM 向けの画像付き送信は、テキスト専用ノードと分離します。画像は ComfyUI `IMAGE` バッチの先頭 1 枚を PNG 化して data URL として送ります。ノード入力としては `max_tokens` と `seed` を扱い、`max_tokens` の既定値は `10240` とします。追加 generation パラメータは `extra_body_json` で任意に指定できます。`strict_finish_reason` は `text` 応答の正常終了判定に使い、`strip_think_tags` は `text` 出力だけを整形し、API 生レスポンスは保持します。
+VLM 向けの画像付き送信は、テキスト専用ノードと分離します。画像は ComfyUI `IMAGE` バッチの先頭 1 枚を PNG 化して data URL として送ります。ノード入力としては `max_tokens` と `seed` を扱い、`max_tokens` の既定値は `10240` とします。追加 generation パラメータは `extra_body_toml` で任意に指定できます。`strict_finish_reason` は `text` 応答の正常終了判定に使い、`strip_think_tags` は `text` 出力だけを整形し、API 生レスポンスは保持します。
 
 ### 履歴付きチャット
 
@@ -66,9 +66,11 @@ VLM 向けの画像付き送信は、テキスト専用ノードと分離しま�
 - `Compatible Model List View` は `models_json` から index とモデル名の対応一覧を文字列で返します
 - `Compatible Model Selector` は `models_json` と index 入力から `model_name` を返します
 - 送信ノードは prompt 入力を主役にし、接続設定を重複させません
-- `extra_body_json` は JSON object 文字列のみ受け付け、空文字は追加なしとして扱います
-- `extra_body_json` で既存 payload キーと衝突する指定はエラーにします
-- `extra_body_json` により、UI に出さない generation パラメータを追加指定できます
+- `extra_body_toml` は root table を持つ TOML 文字列のみ受け付け、空文字は追加なしとして扱います
+- `extra_body_toml` で既存 payload キーと衝突する指定はエラーにします
+- `extra_body_toml` により、UI に出さない generation パラメータを追加指定できます
+- `extra_body_toml` の文字列値は `Prompt Preset` の `variables_toml` と同様に LF へ正規化します
+- `extra_body_toml` では JSON payload へ暗黙変換しづらい TOML の date / time / datetime は受け付けません
 - `strict_finish_reason` は `BOOLEAN` 入力で、既定値は `true` とします
 - `strict_finish_reason=true` の場合、`finish_reason` が `stop` 以外ならエラーにします
 - `strip_think_tags` は `BOOLEAN` 入力で、既定値は `false` とします
@@ -116,9 +118,9 @@ VLM 向けの画像付き送信は、テキスト専用ノードと分離しま�
 - `variables_toml` の TOML 構文エラー
 - `variables_toml` の配列型不正
 - `variables_toml` の table / inline table 型不正
-- `extra_body_json` の不正 JSON
-- `extra_body_json` の型不正
-- `extra_body_json` と既存 payload のキー衝突
+- `extra_body_toml` の TOML 構文エラー
+- `extra_body_toml` の型不正
+- `extra_body_toml` と既存 payload のキー衝突
 - `strict_finish_reason=true` における `finish_reason != "stop"`
 
 モデル一覧取得失敗は手動モデル指定へのフォールバックを基本とします。一方、送信ノード実行時に `model_name` が空ならエラーにします。`strip_think_tags` はレスポンス整形であり、推論ログが存在しない場合でもエラーにはしません。

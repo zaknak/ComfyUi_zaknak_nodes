@@ -1,5 +1,6 @@
 import base64
 import binascii
+import datetime
 import json
 import math
 import re
@@ -666,24 +667,49 @@ def _build_vision_messages(system_prompt: str, user_prompt: str, image_data_url:
     return messages
 
 
-def _parse_extra_body_json(extra_body_json: str, reserved_keys: set[str]) -> dict:
-    text = str(extra_body_json or "").strip()
+def _normalize_toml_json_value(value, key_path: str):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _normalize_newlines(value)
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, list):
+        return [_normalize_toml_json_value(item, f"{key_path}[{index}]") for index, item in enumerate(value)]
+    if isinstance(value, dict):
+        return {
+            str(key): _normalize_toml_json_value(
+                item,
+                f"{key_path}.{key}" if key_path else str(key),
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        raise ValueError(f"extra_body_toml contains unsupported value type for key '{key_path}': {type(value).__name__}")
+    raise ValueError(f"extra_body_toml contains unsupported value type for key '{key_path}': {type(value).__name__}")
+
+
+def _parse_extra_body_toml(extra_body_toml: str, reserved_keys: set[str]) -> dict:
+    text = str(extra_body_toml or "").strip()
     if not text:
         return {}
 
     try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"extra_body_json must be valid JSON: {exc}") from exc
+        parsed = tomli.loads(text)
+    except tomli.TOMLDecodeError as exc:
+        raise ValueError(f"extra_body_toml parse error: {exc}") from exc
 
     if not isinstance(parsed, dict):
-        raise ValueError("extra_body_json must decode to an object")
+        raise ValueError("extra_body_toml must decode to a table")
 
     collisions = sorted(key for key in parsed.keys() if key in reserved_keys)
     if collisions:
-        raise ValueError(f"extra_body_json contains reserved keys: {', '.join(collisions)}")
+        raise ValueError(f"extra_body_toml contains reserved keys: {', '.join(collisions)}")
 
-    return parsed
+    return {
+        str(key): _normalize_toml_json_value(value, str(key))
+        for key, value in parsed.items()
+    }
 
 
 def _chat_completion_request(
@@ -691,7 +717,7 @@ def _chat_completion_request(
     messages: list,
     max_tokens: int,
     seed=None,
-    extra_body_json="",
+    extra_body_toml="",
     reserved_extra_keys=None,
     strip_think_tags: bool = False,
     strict_finish_reason: bool = True,
@@ -705,7 +731,7 @@ def _chat_completion_request(
     if seed is not None:
         payload["seed"] = int(seed)
 
-    extra_body = _parse_extra_body_json(extra_body_json, set(reserved_extra_keys or ()))
+    extra_body = _parse_extra_body_toml(extra_body_toml, set(reserved_extra_keys or ()))
     payload.update(extra_body)
 
     response_json = _http_json_request(
@@ -1041,7 +1067,7 @@ class ChatOnce:
                 "user_prompt": ("STRING", {"default": "", "multiline": True}),
                 "max_tokens": ("INT", {"default": 10240, "min": 0, "max": 65535, "step": 1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
-                "extra_body_json": ("STRING", {"default": "", "multiline": True}),
+                "extra_body_toml": ("STRING", {"default": "", "multiline": True}),
                 "strict_finish_reason": ("BOOLEAN", {"default": True}),
                 "strip_think_tags": ("BOOLEAN", {"default": False}),
                 "timeout_seconds": ("FLOAT", {"default": 60.0, "min": 0.1, "max": 300.0, "step": 0.5}),
@@ -1053,7 +1079,7 @@ class ChatOnce:
     FUNCTION = "chat"
     CATEGORY = "zaknak/llm"
 
-    def chat(self, endpoint, system_prompt, user_prompt, max_tokens, seed, extra_body_json, strict_finish_reason, strip_think_tags, timeout_seconds):
+    def chat(self, endpoint, system_prompt, user_prompt, max_tokens, seed, extra_body_toml, strict_finish_reason, strip_think_tags, timeout_seconds):
         normalized_endpoint = _normalize_endpoint(endpoint, timeout_seconds)
         messages = _build_chat_messages(system_prompt, user_prompt)
         return _chat_completion_request(
@@ -1061,7 +1087,7 @@ class ChatOnce:
             messages,
             int(max_tokens),
             int(seed),
-            extra_body_json,
+            extra_body_toml,
             {"model", "messages", "max_tokens", "seed"},
             bool(strip_think_tags),
             bool(strict_finish_reason),
@@ -1079,7 +1105,7 @@ class VisionChatOnce:
                 "user_prompt": ("STRING", {"default": "", "multiline": True}),
                 "max_tokens": ("INT", {"default": 10240, "min": 0, "max": 65535, "step": 1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0x7FFFFFFF, "step": 1}),
-                "extra_body_json": ("STRING", {"default": "", "multiline": True}),
+                "extra_body_toml": ("STRING", {"default": "", "multiline": True}),
                 "strict_finish_reason": ("BOOLEAN", {"default": True}),
                 "strip_think_tags": ("BOOLEAN", {"default": False}),
                 "timeout_seconds": ("FLOAT", {"default": 60.0, "min": 0.1, "max": 300.0, "step": 0.5}),
@@ -1091,7 +1117,7 @@ class VisionChatOnce:
     FUNCTION = "chat"
     CATEGORY = "zaknak/llm"
 
-    def chat(self, endpoint, image, system_prompt, user_prompt, max_tokens, seed, extra_body_json, strict_finish_reason, strip_think_tags, timeout_seconds):
+    def chat(self, endpoint, image, system_prompt, user_prompt, max_tokens, seed, extra_body_toml, strict_finish_reason, strip_think_tags, timeout_seconds):
         normalized_endpoint = _normalize_endpoint(endpoint, timeout_seconds)
         if image.shape[0] < 1:
             raise ValueError("image input is empty")
@@ -1102,7 +1128,7 @@ class VisionChatOnce:
             messages,
             int(max_tokens),
             int(seed),
-            extra_body_json,
+            extra_body_toml,
             {"model", "messages", "max_tokens", "seed"},
             bool(strip_think_tags),
             bool(strict_finish_reason),
