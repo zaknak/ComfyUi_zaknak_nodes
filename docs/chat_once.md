@@ -15,7 +15,7 @@
 | `user_prompt` | `STRING` | user role 用の prompt |
 | `max_tokens` | `INT` | 出力トークン上限。既定値は `10240`。`0` の場合は body へ含めない |
 | `seed` | `INT` | サーバーが対応している場合に送る乱数シード |
-| `extra_body_json` | `STRING` | POST body へ追加マージする JSON object 文字列。空文字は追加なし |
+| `extra_body_toml` | `STRING` | POST body へ追加マージする TOML 文字列。空文字は追加なし |
 | `strict_finish_reason` | `BOOLEAN` | `true` の場合、`finish_reason` が厳密に `stop` でなければエラーにする |
 | `strip_think_tags` | `BOOLEAN` | `true` の場合、`text` 出力から `<think>` 推論ログ部分を除去する |
 | `timeout_seconds` | `FLOAT` | リクエストのタイムアウト秒数 |
@@ -36,11 +36,13 @@
 - request body は OpenAI 互換 chat completions 相当の形式を基本とします
 - 通常の request body には `max_tokens` と `seed` を含めます
 - `system_prompt` と `user_prompt` の両方が空ならエラーにします
-- `extra_body_json` が空でなければ JSON として解釈し、JSON object の場合だけ既存 payload へ浅く追加マージします
-- `extra_body_json` が JSON として解釈できない場合はエラーにします
-- `extra_body_json` が object 以外の JSON 値だった場合はエラーにします
-- `extra_body_json` に `model`、`messages`、`max_tokens`、`seed` など既存 payload と衝突するキーが含まれていた場合はエラーにします
-- `extra_body_json` では `temperature` と `top_p` を追加指定できます
+- `extra_body_toml` が空でなければ TOML として解釈し、root table の場合だけ既存 payload へ浅く追加マージします
+- `extra_body_toml` が TOML として解釈できない場合はエラーにします
+- `extra_body_toml` に `model`、`messages`、`max_tokens`、`seed` など既存 payload と衝突するキーが含まれていた場合はエラーにします
+- `extra_body_toml` では `temperature` と `top_p` を追加指定できます
+- 値は JSON payload へ変換可能な TOML 型だけを扱い、string / int / float / bool / array / table / inline table を許可します
+- TOML の date / time / datetime は JSON への暗黙変換を行わず、明示的エラーにします
+- TOML 内の文字列値は `Prompt Preset` の `variables_toml` と同様に LF へ正規化してから payload へ入れます
 - 応答本文は `choices[0].message.content` を優先して取り出し、配列形式の content もテキスト連結して扱います
 - `strict_finish_reason=true` の場合、`finish_reason` が厳密に `stop` のときだけ成功とし、それ以外はエラーとして実行を中断します
 - `strict_finish_reason=false` の場合、`finish_reason` は検証せずそのまま出力します
@@ -60,7 +62,15 @@
 
 ### 追加オプション付与の例
 
-`extra_body_json` に `{"response_format":{"type":"json_object"},"temperature":0.7,"top_p":0.9}` のような JSON object を入れると、標準入力で構成した payload に追加パラメータを付けて送信できます。
+`extra_body_toml` に以下のような TOML を入れると、標準入力で構成した payload に追加パラメータを付けて送信できます。
+
+```toml
+temperature = 0.7
+top_p = 0.9
+
+[response_format]
+type = "json_object"
+```
 
 ### 推論ログ除去の例
 
@@ -72,9 +82,10 @@
 - ストリーミング応答は対象外です
 - すべての OpenAI 互換サーバーが同じ generation パラメータを受け付けるとは限りません
 - `seed` はサーバー非対応の可能性があります
-- `extra_body_json` は JSON object のみを受け付けます
-- `extra_body_json` で `model`、`messages`、`max_tokens`、`seed` を上書きすることはできません
-- `temperature` と `top_p` はノード入力にはありませんが、必要なら `extra_body_json` で追加指定できます
+- `extra_body_toml` は root table を持つ TOML のみを受け付けます
+- `extra_body_toml` で `model`、`messages`、`max_tokens`、`seed` を上書きすることはできません
+- `temperature` と `top_p` はノード入力にはありませんが、必要なら `extra_body_toml` で追加指定できます
+- `extra_body_toml` では TOML の date / time / datetime を使えません
 - `strict_finish_reason` の既定値は `true` です
 - `strict_finish_reason=true` の場合、`finish_reason` が `stop` 以外、空文字、未設定ならエラーになります
 - `strip_think_tags` の既定値は `false` です
