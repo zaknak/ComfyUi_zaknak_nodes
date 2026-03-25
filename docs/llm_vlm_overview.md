@@ -89,9 +89,11 @@ VLM 向けの画像付き送信は、テキスト専用ノードと分離しま�
 
 ## プリセット方針
 
-- プリセットは外部 `.toml` ファイルのみを読み込みます
+- プリセット定義は `.toml` ファイルのみを扱います
+- プリセット利用ノードは、外部 `.toml` を指定する `Prompt Preset` と、同梱 `.toml` を固定で読む `Bundled Prompt Preset` の 2 系統です
 - ルートには `version = 1` と `presets` テーブルが必須です
 - 各プリセットは `[presets.<id>]` 形式で定義します
+- 同梱版で UI 選択対象にするプリセットは `label` を持ち、同一ファイル内で一意である必要があります
 - 変数入力は `input_text` と `variables_toml` の 2 系統で受けます
 - `input_text` は `input` 変数として扱い、同名競合時は `variables_toml` より優先します
 - `system` と `user` は少なくともどちらか一方を持てます
@@ -145,6 +147,7 @@ Compatible LLM / VLM 系の実装は HTTP 通信と画像 PNG 化を標準ライ
 - [Compatible Model List View](compatible_model_list_view.md)
 - [Compatible Model Selector](compatible_model_selector.md)
 - [Prompt Preset](prompt_preset.md)
+- [Bundled Prompt Preset](bundled_prompt_preset.md)
 - [Chat Once](chat_once.md)
 - [Vision Chat Once](vision_chat_once.md)
 - [Chat History Future](chat_history_future.md)
