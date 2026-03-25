@@ -25,6 +25,7 @@ git clone https://github.com/zaknak/ComfyUi_zaknak_nodes.git
 | Compatible Model List View | `Compatible Endpoint` の `models_json` を `index: model_name` の一覧文字列へ整形して表示確認しやすくする | [docs/compatible_model_list_view.md](docs/compatible_model_list_view.md) | 実装済み |
 | Compatible Model Selector | `Compatible Endpoint` の `models_json` から index 指定でモデル名を選び、`model_name` のみを出力する | [docs/compatible_model_selector.md](docs/compatible_model_selector.md) | 実装済み |
 | Prompt Preset | 外部 TOML ファイルから prompt プリセット定義を読み出し、再利用しやすい prompt 設定を提供する | [docs/prompt_preset.md](docs/prompt_preset.md) | 実装済み |
+| Bundled Prompt Preset | リポジトリ同梱の既定 TOML から prompt プリセットを読み出し、表示名で選択して使う | [docs/bundled_prompt_preset.md](docs/bundled_prompt_preset.md) | 実装済み |
 | Chat Once | OpenAI 互換 API へ単発のテキストチャットを送信し、応答文字列とメタ情報を得る | [docs/chat_once.md](docs/chat_once.md) | 実装済み |
 | Vision Chat Once | ComfyUI の画像入力先頭 1 枚とテキストを OpenAI 互換 API へ送り、画像付き応答を得る | [docs/vision_chat_once.md](docs/vision_chat_once.md) | 実装済み |
 
@@ -42,6 +43,7 @@ git clone https://github.com/zaknak/ComfyUi_zaknak_nodes.git
 - `Prompt Preset` の追加変数は `variables_toml` で与え、同名なら個別欄の `input_text` が優先されます
 - `variables_toml` はフラットな TOML key-value のみを受け付け、array / table / inline table は扱いません
 - `Prompt Preset` は未解決変数をコンソールへ出力し、`keep_unresolved_variables` で出力へ残すか空文字にするかを切り替えられます
+- `Bundled Prompt Preset` はリポジトリ同梱の既定 `.toml` を固定で読み込み、`label` を使ってプリセットを選択します
 - `Chat Once` / `Vision Chat Once` の追加 body パラメータは `extra_body_toml` で与え、`Prompt Preset` と同じく TOML ベースで統一します
 
 ## Prompt Preset TOML 例

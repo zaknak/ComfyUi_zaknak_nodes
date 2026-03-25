@@ -3,6 +3,7 @@ import binascii
 import datetime
 import json
 import math
+import os
 import re
 import struct
 import time
@@ -20,6 +21,11 @@ CHAT_COMPLETION_PATH = "/chat/completions"
 MODELS_PATH = "/models"
 DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
 CUSTOM_TYPE_ENDPOINT = "COMPATIBLE_ENDPOINT"
+BUNDLED_PROMPT_PRESET_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "presets",
+    "default_prompt_presets.toml",
+)
 
 
 def _normalize_mask_shape(mask: torch.Tensor) -> torch.Tensor:
@@ -485,6 +491,68 @@ def _resolve_preset_definition(document: dict, preset_id: str) -> dict | None:
     return dict(preset)
 
 
+def _list_bundled_preset_labels(document: dict) -> list[str]:
+    presets = _validate_preset_document(document)
+    labels = []
+    seen_labels = set()
+
+    for preset_id, preset in presets.items():
+        if not isinstance(preset, dict):
+            raise ValueError(f"invalid preset structure: presets.{preset_id} must be a table")
+        if "system" not in preset and "user" not in preset:
+            raise ValueError(f"invalid preset structure: presets.{preset_id} must contain system or user")
+
+        label = str(preset.get("label") or "").strip()
+        if not label:
+            raise ValueError(f"invalid preset structure: presets.{preset_id}.label is required")
+        if label in seen_labels:
+            raise ValueError(f"duplicate preset label: {label}")
+
+        seen_labels.add(label)
+        labels.append(label)
+
+    if not labels:
+        raise ValueError("invalid preset structure: at least one preset is required")
+    return labels
+
+
+def _resolve_bundled_preset_definition(document: dict, preset_label: str) -> tuple[str, dict]:
+    target_label = str(preset_label or "").strip()
+    if not target_label:
+        raise ValueError("preset_label is required")
+
+    presets = _validate_preset_document(document)
+    matched_preset_id = None
+    matched_preset = None
+
+    for preset_id, preset in presets.items():
+        if not isinstance(preset, dict):
+            raise ValueError(f"invalid preset structure: presets.{preset_id} must be a table")
+        if "system" not in preset and "user" not in preset:
+            raise ValueError(f"invalid preset structure: presets.{preset_id} must contain system or user")
+
+        label = str(preset.get("label") or "").strip()
+        if not label:
+            raise ValueError(f"invalid preset structure: presets.{preset_id}.label is required")
+        if label == target_label:
+            if matched_preset_id is not None:
+                raise ValueError(f"duplicate preset label: {label}")
+            matched_preset_id = str(preset_id)
+            matched_preset = dict(preset)
+
+    if matched_preset_id is None or matched_preset is None:
+        raise ValueError(f"preset label not found: {target_label}")
+    return matched_preset_id, matched_preset
+
+
+def _get_bundled_preset_labels() -> list[str]:
+    try:
+        document = _load_toml_document(BUNDLED_PROMPT_PRESET_PATH)
+        return _list_bundled_preset_labels(document)
+    except Exception:
+        return [""]
+
+
 def _stringify_variable_value(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -634,6 +702,20 @@ def _build_prompt_outputs(
         set(prompt_meta["unresolved_in_system"]) | set(unresolved_user)
     )
     return system_prompt, user_prompt, prompt_meta
+
+
+def _build_preset_result(
+    preset: dict | None,
+    prompt_meta: dict[str, object],
+    preset_name: str,
+) -> tuple[str, str]:
+    preset_meta = {
+        key: value
+        for key, value in (preset or {}).items()
+        if key not in {"system", "user"}
+    }
+    preset_meta["_prompt_preset"] = prompt_meta
+    return _json_dumps(preset_meta), str(preset_name)
 
 
 def _build_chat_messages(system_prompt: str, user_prompt: str) -> list:
@@ -1048,13 +1130,47 @@ class PromptPreset:
             bool(keep_unresolved_variables),
         )
         preset_name = str((preset or {}).get("label") or preset_id)
-        preset_meta = {
-            key: value
-            for key, value in (preset or {}).items()
-            if key not in {"system", "user"}
+        preset_meta_json, resolved_preset_name = _build_preset_result(preset, prompt_meta, preset_name)
+        return (system_prompt, user_prompt, preset_meta_json, resolved_preset_name)
+
+
+class BundledPromptPreset:
+    @classmethod
+    def INPUT_TYPES(cls):
+        preset_labels = _get_bundled_preset_labels()
+        return {
+            "required": {
+                "preset_label": (preset_labels, {"default": preset_labels[0]}),
+                "input_text": ("STRING", {"default": "", "multiline": True}),
+                "variables_toml": ("STRING", {"default": "", "multiline": True}),
+                "fallback_user_prompt": ("STRING", {"default": "", "multiline": True}),
+                "keep_unresolved_variables": ("BOOLEAN", {"default": True}),
+            }
         }
-        preset_meta["_prompt_preset"] = prompt_meta
-        return (system_prompt, user_prompt, _json_dumps(preset_meta), preset_name)
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("system_prompt", "user_prompt", "preset_meta_json", "preset_name")
+    FUNCTION = "load_preset"
+    CATEGORY = "zaknak/llm"
+
+    def load_preset(self, preset_label, input_text, variables_toml, fallback_user_prompt, keep_unresolved_variables):
+        document = _load_toml_document(BUNDLED_PROMPT_PRESET_PATH)
+        _list_bundled_preset_labels(document)
+        preset_id, preset = _resolve_bundled_preset_definition(document, preset_label)
+        system_prompt, user_prompt, prompt_meta = _build_prompt_outputs(
+            preset,
+            preset_id,
+            input_text,
+            variables_toml,
+            fallback_user_prompt,
+            bool(keep_unresolved_variables),
+        )
+        preset_meta_json, preset_name = _build_preset_result(
+            preset,
+            prompt_meta,
+            str(preset.get("label") or preset_label),
+        )
+        return (system_prompt, user_prompt, preset_meta_json, preset_name)
 
 
 class ChatOnce:
@@ -1142,6 +1258,7 @@ NODE_CLASS_MAPPINGS = {
     "CompatibleModelListView": CompatibleModelListView,
     "CompatibleModelSelector": CompatibleModelSelector,
     "PromptPreset": PromptPreset,
+    "BundledPromptPreset": BundledPromptPreset,
     "ChatOnce": ChatOnce,
     "VisionChatOnce": VisionChatOnce,
 }
@@ -1153,6 +1270,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "CompatibleModelListView": "Compatible Model List View",
     "CompatibleModelSelector": "Compatible Model Selector",
     "PromptPreset": "Prompt Preset",
+    "BundledPromptPreset": "Bundled Prompt Preset",
     "ChatOnce": "Chat Once",
     "VisionChatOnce": "Vision Chat Once",
 }
